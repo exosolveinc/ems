@@ -1,0 +1,22 @@
+{
+  "name": "employee-management-backend",
+  "version": "1.0.0",
+  "description": "Backend for Employee Management System",
+  "scripts": {
+    "deploy": "supabase functions deploy",
+    "deploy:checkin": "supabase functions deploy checkin",
+    "deploy:checkout": "supabase functions deploy checkout",
+    "deploy:all": "supabase functions deploy --no-verify-jwt",
+    "serve": "supabase functions serve",
+    "test": "deno test --allow-all",
+    "db:push": "supabase db push",
+    "db:reset": "supabase db reset",
+    "db:seed": "supabase db seed"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.0"
+  },
+  "devDependencies": {
+    "supabase": "^2.58.5"
+  }
+}
