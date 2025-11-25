@@ -6,12 +6,18 @@
     "deploy": "supabase functions deploy",
     "deploy:checkin": "supabase functions deploy checkin",
     "deploy:checkout": "supabase functions deploy checkout",
+    "deploy:signin": "supabase functions deploy signin",
+    "deploy:signup": "supabase functions deploy signup",
+    "deploy:violations": "supabase functions deploy violations detect-violations",
+    "deploy:vacation": "supabase functions deploy vacation-request vacation-approve",
+    "deploy:timesheet": "supabase functions deploy timesheet-submit timesheet-approve",
     "deploy:all": "supabase functions deploy --no-verify-jwt",
     "serve": "supabase functions serve",
     "test": "deno test --allow-all",
     "db:push": "supabase db push",
     "db:reset": "supabase db reset",
-    "db:seed": "supabase db seed"
+    "db:seed": "supabase db seed",
+    "db:migrate": "supabase db reset"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.38.0"
