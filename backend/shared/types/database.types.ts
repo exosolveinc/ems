@@ -96,3 +96,12 @@ export interface HourlyStatus {
   status_message?: string;
   created_at: string;
 }
+
+export interface StandupEntry {
+  project_name: string
+  ticket_number?: string
+  task_description: string
+  confidence_score: number
+  difficulty_level: number
+  estimated_hours?: number
+}

@@ -1,13 +1,20 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+// import { StandupEntry } from '../../../shared/types/database.types'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
-
+export interface StandupEntry {
+  project_name: string
+  ticket_number?: string
+  task_description: string
+  confidence_score: number
+  difficulty_level: number
+  estimated_hours?: number
+}
 serve(async (req) => {
-  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
@@ -38,7 +45,7 @@ serve(async (req) => {
     const { data: { user }, error: authError } = await supabaseAuth.auth.getUser()
     if (authError || !user) {
       return new Response(
-        JSON.stringify({ success: false, error: 'Unauthorized', user: user, authError: authError }),
+        JSON.stringify({ success: false, error: 'Unauthorized' }),
         { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -50,9 +57,15 @@ serve(async (req) => {
       .eq('id', user.id)
       .single()
 
-    const userRole = employee?.role || 'employee'
+    if (!employee) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Employee record not found' }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
-    // Only employees can check in (not admins checking in on behalf of others)
+    const userRole = employee.role || 'employee'
+
     if (userRole !== 'employee' && userRole !== 'manager' && userRole !== 'hr') {
       return new Response(
         JSON.stringify({ success: false, error: 'Only employees can check in' }),
@@ -60,22 +73,44 @@ serve(async (req) => {
       )
     }
 
-    const { location, ip, notes } = await req.json()
+    const { 
+      location, 
+      ip, 
+      notes,
+      work_location,
+      yesterday = [],
+      today = [],
+      blockers = []
+    } = await req.json()
 
-    // Employee can only check in themselves
+    // Validate required fields
+    if (!work_location || !['home', 'office'].includes(work_location)) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'work_location is required (home or office)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!today || today.length === 0) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'At least one task for today is required' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
     const employee_id = user.id
 
     // Check if already checked in today (using EST)
     const now = new Date()
     const estTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
-    const today = new Date(estTime)
-    today.setHours(0, 0, 0, 0)
+    const todayStart = new Date(estTime)
+    todayStart.setHours(0, 0, 0, 0)
 
-    const { data: existing, error: checkError } = await supabaseAdmin
+    const { data: existing } = await supabaseAdmin
       .from('check_ins')
       .select('id')
       .eq('employee_id', employee_id)
-      .gte('check_in_time', today.toISOString())
+      .gte('check_in_time', todayStart.toISOString())
       .single()
 
     if (existing) {
@@ -86,24 +121,71 @@ serve(async (req) => {
     }
 
     // Create check-in record
-    const { data: checkin, error } = await supabaseAdmin
+    const { data: checkin, error: checkinError } = await supabaseAdmin
       .from('check_ins')
       .insert({
         employee_id,
         check_in_location: location,
         check_in_ip: ip,
         check_in_notes: notes,
+        work_location,
+        has_blockers: blockers.length > 0,
       })
       .select()
       .single()
 
-    if (error) throw error
+    if (checkinError) throw checkinError
+
+    // Insert standup entries
+    const standupEntries = [
+      ...yesterday.map((entry: StandupEntry) => ({
+        check_in_id: checkin.id,
+        employee_id,
+        entry_type: 'yesterday',
+        project_name: entry.project_name,
+        ticket_number: entry.ticket_number || null,
+        task_description: entry.task_description,
+        confidence_score: entry.confidence_score,
+        difficulty_level: entry.difficulty_level,
+        estimated_hours: entry.estimated_hours || null,
+      })),
+      ...today.map((entry: StandupEntry) => ({
+        check_in_id: checkin.id,
+        employee_id,
+        entry_type: 'today',
+        project_name: entry.project_name,
+        ticket_number: entry.ticket_number || null,
+        task_description: entry.task_description,
+        confidence_score: entry.confidence_score,
+        difficulty_level: entry.difficulty_level,
+        estimated_hours: entry.estimated_hours || null,
+      })),
+      ...blockers.map((entry: StandupEntry) => ({
+        check_in_id: checkin.id,
+        employee_id,
+        entry_type: 'blocker',
+        project_name: entry.project_name,
+        ticket_number: entry.ticket_number || null,
+        task_description: entry.task_description,
+        confidence_score: entry.confidence_score || null,
+        difficulty_level: entry.difficulty_level || null,
+        estimated_hours: entry.estimated_hours || null,
+      })),
+    ]
+
+    if (standupEntries.length > 0) {
+      const { error: standupError } = await supabaseAdmin
+        .from('standup_entries')
+        .insert(standupEntries)
+
+      if (standupError) throw standupError
+    }
 
     // Check if late and create violation (using EST)
     const checkInTimeUTC = new Date(checkin.check_in_time)
     const checkInTime = new Date(checkInTimeUTC.toLocaleString('en-US', { timeZone: 'America/New_York' }))
     const workStart = new Date(checkInTime)
-    workStart.setHours(9, 0, 0, 0) // 9 AM EST work start
+    workStart.setHours(9, 0, 0, 0)
 
     let violation = null
     if (checkInTime > workStart) {
@@ -113,7 +195,7 @@ serve(async (req) => {
       if (minutesLate > 60) severity = 'high'
       else if (minutesLate > 30) severity = 'medium'
 
-      const { data: violationData } = await supabaseAdmin
+      await supabaseAdmin
         .from('violations')
         .insert({
           employee_id,
@@ -122,8 +204,6 @@ serve(async (req) => {
           severity,
           description: `Checked in ${minutesLate} minutes late`,
         })
-        .select()
-        .single()
 
       violation = {
         created: true,
@@ -135,7 +215,19 @@ serve(async (req) => {
     return new Response(
       JSON.stringify({
         success: true,
-        data: checkin,
+        data: {
+          checkin,
+          standup: {
+            yesterday: yesterday.length,
+            today: today.length,
+            blockers: blockers.length,
+          },
+        },
+        employee: {
+          id: employee_id,
+          name: employee.full_name,
+          employee_id: employee.employee_id,
+        },
         violation,
       }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
