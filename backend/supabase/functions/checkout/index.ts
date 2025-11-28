@@ -12,25 +12,65 @@ serve(async (req) => {
   }
 
   try {
-    const { employee_id, location, ip, notes } = await req.json()
-
-    if (!employee_id) {
+    // Get auth header
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader) {
       return new Response(
-        JSON.stringify({ success: false, error: 'employee_id is required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ success: false, error: 'Missing authorization header' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    const supabase = createClient(
+    // Create Supabase clients
+    const supabaseAuth = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: authHeader } } }
+    )
+
+    const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    // Get today's check-in
-    const today = new Date()
+    // Verify authentication
+    const { data: { user }, error: authError } = await supabaseAuth.auth.getUser()
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Get user role from employees table
+    const { data: employee } = await supabaseAdmin
+      .from('employees')
+      .select('role, employee_id, full_name')
+      .eq('id', user.id)
+      .single()
+
+    const userRole = employee?.role || 'employee'
+
+    // Only employees can check out (not admins checking out on behalf of others)
+    if (userRole !== 'employee' && userRole !== 'manager' && userRole !== 'hr') {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Only employees can check out' }),
+        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    const { location, ip, notes } = await req.json()
+
+    // Employee can only check out themselves
+    const employee_id = user.id
+
+    // Get today's check-in (using EST)
+    const now = new Date()
+    const estTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+    const today = new Date(estTime)
     today.setHours(0, 0, 0, 0)
 
-    const { data: checkin, error: checkinError } = await supabase
+    const { data: checkin, error: checkinError } = await supabaseAdmin
       .from('check_ins')
       .select('id, check_in_time')
       .eq('employee_id', employee_id)
@@ -45,7 +85,7 @@ serve(async (req) => {
     }
 
     // Check if already checked out
-    const { data: existingCheckout } = await supabase
+    const { data: existingCheckout } = await supabaseAdmin
       .from('check_outs')
       .select('id')
       .eq('check_in_id', checkin.id)
@@ -58,13 +98,14 @@ serve(async (req) => {
       )
     }
 
-    // Calculate total hours
+    // Calculate total hours (using EST)
     const checkInTime = new Date(checkin.check_in_time)
-    const checkOutTime = new Date()
+    const checkOutTimeUTC = new Date()
+    const checkOutTime = new Date(checkOutTimeUTC.toLocaleString('en-US', { timeZone: 'America/New_York' }))
     const totalHours = (checkOutTime.getTime() - checkInTime.getTime()) / (1000 * 60 * 60)
 
     // Create check-out record
-    const { data: checkout, error } = await supabase
+    const { data: checkout, error } = await supabaseAdmin
       .from('check_outs')
       .insert({
         employee_id,

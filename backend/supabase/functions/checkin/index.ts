@@ -13,27 +13,65 @@ serve(async (req) => {
   }
 
   try {
-    const { employee_id, location, ip, notes } = await req.json()
-
-    // Validate input
-    if (!employee_id) {
+    // Get auth header
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader) {
       return new Response(
-        JSON.stringify({ success: false, error: 'employee_id is required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ success: false, error: 'Missing authorization header' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Create Supabase client
-    const supabase = createClient(
+    // Create Supabase clients
+    const supabaseAuth = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: authHeader } } }
+    )
+
+    const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    // Check if already checked in today
-    const today = new Date()
+    // Verify authentication
+    const { data: { user }, error: authError } = await supabaseAuth.auth.getUser()
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Unauthorized', user: user, authError: authError }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Get user role from employees table
+    const { data: employee } = await supabaseAdmin
+      .from('employees')
+      .select('role, employee_id, full_name')
+      .eq('id', user.id)
+      .single()
+
+    const userRole = employee?.role || 'employee'
+
+    // Only employees can check in (not admins checking in on behalf of others)
+    if (userRole !== 'employee' && userRole !== 'manager' && userRole !== 'hr') {
+      return new Response(
+        JSON.stringify({ success: false, error: 'Only employees can check in' }),
+        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    const { location, ip, notes } = await req.json()
+
+    // Employee can only check in themselves
+    const employee_id = user.id
+
+    // Check if already checked in today (using EST)
+    const now = new Date()
+    const estTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+    const today = new Date(estTime)
     today.setHours(0, 0, 0, 0)
 
-    const { data: existing, error: checkError } = await supabase
+    const { data: existing, error: checkError } = await supabaseAdmin
       .from('check_ins')
       .select('id')
       .eq('employee_id', employee_id)
@@ -48,7 +86,7 @@ serve(async (req) => {
     }
 
     // Create check-in record
-    const { data: checkin, error } = await supabase
+    const { data: checkin, error } = await supabaseAdmin
       .from('check_ins')
       .insert({
         employee_id,
@@ -61,20 +99,21 @@ serve(async (req) => {
 
     if (error) throw error
 
-    // Check if late and create violation
-    const checkInTime = new Date(checkin.check_in_time)
+    // Check if late and create violation (using EST)
+    const checkInTimeUTC = new Date(checkin.check_in_time)
+    const checkInTime = new Date(checkInTimeUTC.toLocaleString('en-US', { timeZone: 'America/New_York' }))
     const workStart = new Date(checkInTime)
-    workStart.setHours(9, 0, 0, 0) // 9 AM work start
+    workStart.setHours(9, 0, 0, 0) // 9 AM EST work start
 
     let violation = null
     if (checkInTime > workStart) {
       const minutesLate = Math.floor((checkInTime.getTime() - workStart.getTime()) / (1000 * 60))
-      
+
       let severity = 'low'
       if (minutesLate > 60) severity = 'high'
       else if (minutesLate > 30) severity = 'medium'
 
-      const { data: violationData } = await supabase
+      const { data: violationData } = await supabaseAdmin
         .from('violations')
         .insert({
           employee_id,

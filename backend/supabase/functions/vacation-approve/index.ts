@@ -46,27 +46,33 @@ serve(async (req) => {
     // Get user role
     const { data: employee } = await supabaseAdmin
       .from('employees')
-      .select('role')
+      .select('role, full_name')
       .eq('id', user.id)
       .single()
 
     const userRole = employee?.role || user.user_metadata?.role || 'employee'
+    const approverName = employee?.full_name || user.email
+
+    // Check if user has permission to approve (admin or manager only)
+    if (userRole !== 'admin' && userRole !== 'manager') {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'Access denied. Only admins and managers can approve vacation requests'
+        }),
+        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
     // Route based on method
     const url = new URL(req.url)
-    const pathParts = url.pathname.split('/').filter(Boolean)
-    const requestId = pathParts[pathParts.length - 1]
+    const searchParams = url.searchParams
 
     switch (req.method) {
       case 'GET':
-        return await handleGet(supabaseAdmin, user.id, userRole, requestId)
+        return await handleGetPending(supabaseAdmin, searchParams)
       case 'POST':
-        return await handleCreate(supabaseAdmin, user.id, req)
-      case 'PUT':
-      case 'PATCH':
-        return await handleUpdate(supabaseAdmin, user.id, userRole, requestId, req)
-      case 'DELETE':
-        return await handleDelete(supabaseAdmin, user.id, userRole, requestId)
+        return await handleApprove(supabaseAdmin, user.id, approverName, req)
       default:
         return new Response(
           JSON.stringify({ success: false, error: 'Method not allowed' }),
@@ -81,42 +87,80 @@ serve(async (req) => {
   }
 })
 
-// GET - List vacation requests
-async function handleGet(supabase: any, userId: string, userRole: string, requestId: string) {
+// GET - List pending vacation requests for approval
+async function handleGetPending(supabase: any, searchParams: URLSearchParams) {
   try {
-    // Get specific request by ID
-    if (requestId && requestId !== 'vacation-request') {
-      const { data, error } = await supabase
-        .from('vacation_requests')
-        .select(`
-          *,
-          employees:employee_id (
-            employee_id,
-            full_name,
-            email
-          )
-        `)
-        .eq('id', requestId)
-        .single()
-
-      if (error) throw error
-
-      // Check permissions
-      if (userRole !== 'admin' && userRole !== 'manager' && data.employee_id !== userId) {
-        return new Response(
-          JSON.stringify({ success: false, error: 'Access denied' }),
-          { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    let query = supabase
+      .from('vacation_requests')
+      .select(`
+        *,
+        employees:employee_id (
+          employee_id,
+          full_name,
+          email,
+          department,
+          designation
         )
-      }
+      `)
 
+    // Filter by status (default to pending)
+    const status = searchParams.get('status') || 'pending'
+    query = query.eq('status', status)
+
+    // Filter by employee_id if provided
+    const employeeId = searchParams.get('employee_id')
+    if (employeeId) {
+      query = query.eq('employee_id', employeeId)
+    }
+
+    // Filter by date range
+    const startDate = searchParams.get('start_date')
+    const endDate = searchParams.get('end_date')
+    if (startDate) {
+      query = query.gte('start_date', startDate)
+    }
+    if (endDate) {
+      query = query.lte('end_date', endDate)
+    }
+
+    // Order by created date
+    query = query.order('created_at', { ascending: false })
+
+    const { data, error } = await query
+
+    if (error) throw error
+
+    return new Response(
+      JSON.stringify({ success: true, data, count: data.length }),
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    )
+  } catch (error) {
+    throw error
+  }
+}
+
+// POST - Approve or reject vacation request
+async function handleApprove(supabase: any, userId: string, approverName: string, req: Request) {
+  try {
+    const { request_id, action, notes } = await req.json()
+
+    // Validate input
+    if (!request_id) {
       return new Response(
-        JSON.stringify({ success: true, data }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ success: false, error: 'request_id is required' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // List all requests based on role
-    let query = supabase
+    if (!action || !['approve', 'reject'].includes(action)) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'action must be either "approve" or "reject"' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Get the vacation request
+    const { data: request, error: fetchError } = await supabase
       .from('vacation_requests')
       .select(`
         *,
@@ -126,259 +170,84 @@ async function handleGet(supabase: any, userId: string, userRole: string, reques
           email
         )
       `)
-      .order('created_at', { ascending: false })
+      .eq('id', request_id)
+      .single()
 
-    // Regular employees can only see their own requests
-    if (userRole !== 'admin' && userRole !== 'manager') {
-      query = query.eq('employee_id', userId)
-    }
-
-    const { data, error } = await query
-
-    if (error) throw error
-
-    return new Response(
-      JSON.stringify({ success: true, data }),
-      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
-  } catch (error) {
-    throw error
-  }
-}
-
-// POST - Create vacation request
-async function handleCreate(supabase: any, userId: string, req: Request) {
-  try {
-    const { start_date, end_date, reason, vacation_type } = await req.json()
-
-    // Validate required fields
-    if (!start_date || !end_date) {
+    if (fetchError || !request) {
       return new Response(
-        JSON.stringify({ success: false, error: 'start_date and end_date are required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ success: false, error: 'Vacation request not found' }),
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Validate dates
-    const startDate = new Date(start_date)
-    const endDate = new Date(end_date)
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-
-    if (startDate < today) {
+    // Check if request is in correct status
+    if (request.status !== 'pending') {
       return new Response(
-        JSON.stringify({ success: false, error: 'Start date cannot be in the past' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (endDate < startDate) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'End date must be after start date' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Calculate days
-    const days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
-
-    // Check for overlapping requests
-    const { data: overlapping } = await supabase
-      .from('vacation_requests')
-      .select('id')
-      .eq('employee_id', userId)
-      .in('status', ['pending', 'approved'])
-      .or(`start_date.lte.${end_date},end_date.gte.${start_date}`)
-
-    if (overlapping && overlapping.length > 0) {
-      return new Response(
-        JSON.stringify({ 
-          success: false, 
-          error: 'You have an overlapping vacation request' 
+        JSON.stringify({
+          success: false,
+          error: `This vacation request has already been ${request.status}`
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Create vacation request
-    const { data, error } = await supabase
+    // Determine new status
+    const newStatus = action === 'approve' ? 'approved' : 'rejected'
+
+    // Update vacation request
+    const { data: updatedRequest, error: updateError } = await supabase
       .from('vacation_requests')
-      .insert({
-        employee_id: userId,
-        start_date,
-        end_date,
-        days,
-        reason,
-        vacation_type: vacation_type || 'annual',
-        status: 'pending',
+      .update({
+        status: newStatus,
+        reviewed_by: userId,
+        reviewed_at: new Date().toISOString(),
+        review_notes: notes || null,
       })
-      .select()
+      .eq('id', request_id)
+      .select(`
+        *,
+        employees:employee_id (
+          employee_id,
+          full_name,
+          email
+        ),
+        reviewer:reviewed_by (
+          full_name,
+          email
+        )
+      `)
       .single()
 
-    if (error) throw error
+    if (updateError) throw updateError
+
+    // Create notification for employee
+    await supabase
+      .from('notifications')
+      .insert({
+        employee_id: request.employee_id,
+        type: 'vacation_update',
+        title: `Vacation Request ${action === 'approve' ? 'Approved' : 'Rejected'}`,
+        message: `Your vacation request from ${request.start_date} to ${request.end_date} has been ${newStatus} by ${approverName}`,
+        read: false,
+      })
+      .catch(() => {}) // Ignore if notifications table doesn't exist
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: 'Vacation request created successfully',
-        data 
-      }),
-      { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
-  } catch (error) {
-    throw error
-  }
-}
-
-// PUT/PATCH - Update vacation request (approve/reject or edit)
-async function handleUpdate(supabase: any, userId: string, userRole: string, requestId: string, req: Request) {
-  try {
-    if (!requestId || requestId === 'vacation-request') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Request ID is required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    const body = await req.json()
-
-    // Get existing request
-    const { data: existing, error: fetchError } = await supabase
-      .from('vacation_requests')
-      .select('*')
-      .eq('id', requestId)
-      .single()
-
-    if (fetchError || !existing) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Vacation request not found' }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Check permissions for status change (admin/manager only)
-    if (body.status && (userRole !== 'admin' && userRole !== 'manager')) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Only admins can approve/reject requests' }),
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Check permissions for editing own request
-    if (!body.status && existing.employee_id !== userId) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'You can only edit your own requests' }),
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Prevent editing approved/rejected requests
-    if (!body.status && existing.status !== 'pending') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Cannot edit non-pending requests' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Build update object
-    const updateData: any = {}
-
-    if (body.status) {
-      updateData.status = body.status
-      updateData.reviewed_by = userId
-      updateData.reviewed_at = new Date().toISOString()
-      if (body.admin_notes) {
-        updateData.admin_notes = body.admin_notes
-      }
-    } else {
-      if (body.start_date) updateData.start_date = body.start_date
-      if (body.end_date) updateData.end_date = body.end_date
-      if (body.reason) updateData.reason = body.reason
-      if (body.vacation_type) updateData.vacation_type = body.vacation_type
-
-      // Recalculate days if dates changed
-      if (body.start_date || body.end_date) {
-        const startDate = new Date(body.start_date || existing.start_date)
-        const endDate = new Date(body.end_date || existing.end_date)
-        updateData.days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
-      }
-    }
-
-    // Update request
-    const { data, error } = await supabase
-      .from('vacation_requests')
-      .update(updateData)
-      .eq('id', requestId)
-      .select()
-      .single()
-
-    if (error) throw error
-
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: 'Vacation request updated successfully',
-        data 
-      }),
-      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
-  } catch (error) {
-    throw error
-  }
-}
-
-// DELETE - Delete vacation request
-async function handleDelete(supabase: any, userId: string, userRole: string, requestId: string) {
-  try {
-    if (!requestId || requestId === 'vacation-request') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Request ID is required' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Get existing request
-    const { data: existing, error: fetchError } = await supabase
-      .from('vacation_requests')
-      .select('*')
-      .eq('id', requestId)
-      .single()
-
-    if (fetchError || !existing) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Vacation request not found' }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Check permissions (own request or admin)
-    if (existing.employee_id !== userId && userRole !== 'admin') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Access denied' }),
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Prevent deleting approved requests (only admin can)
-    if (existing.status === 'approved' && userRole !== 'admin') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'Cannot delete approved requests' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Delete request
-    const { error } = await supabase
-      .from('vacation_requests')
-      .delete()
-      .eq('id', requestId)
-
-    if (error) throw error
-
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: 'Vacation request deleted successfully' 
+      JSON.stringify({
+        success: true,
+        message: `Vacation request ${newStatus} successfully`,
+        data: {
+          id: updatedRequest.id,
+          employee: updatedRequest.employees,
+          start_date: updatedRequest.start_date,
+          end_date: updatedRequest.end_date,
+          days: updatedRequest.days,
+          vacation_type: updatedRequest.vacation_type,
+          status: updatedRequest.status,
+          reviewed_by: approverName,
+          reviewed_at: updatedRequest.reviewed_at,
+          review_notes: updatedRequest.review_notes,
+        },
       }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
