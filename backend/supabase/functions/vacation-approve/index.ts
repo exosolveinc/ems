@@ -232,6 +232,11 @@ async function handleApprove(supabase: any, userId: string, approverName: string
       })
       .catch(() => {}) // Ignore if notifications table doesn't exist
 
+    // Map total_days to days for backward compatibility
+    const daysAlias = (updatedRequest && updatedRequest.total_days !== undefined)
+      ? updatedRequest.total_days
+      : updatedRequest.days
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -241,7 +246,7 @@ async function handleApprove(supabase: any, userId: string, approverName: string
           employee: updatedRequest.employees,
           start_date: updatedRequest.start_date,
           end_date: updatedRequest.end_date,
-          days: updatedRequest.days,
+          days: daysAlias,
           vacation_type: updatedRequest.vacation_type,
           status: updatedRequest.status,
           reviewed_by: approverName,

@@ -93,7 +93,7 @@ async function handleGet(
     // Get specific status by ID
     if (statusId && statusId !== 'hourly-status') {
       const { data, error } = await supabase
-        .from('hourly_statuses')
+        .from('hourly_status')
         .select(`
           *,
           employees:employee_id (
@@ -128,7 +128,7 @@ async function handleGet(
 
     // List statuses with filters
     let query = supabase
-      .from('hourly_statuses')
+      .from('hourly_status')
       .select(`
         *,
         employees:employee_id (
@@ -176,16 +176,10 @@ async function handleGet(
       query = query.lte('status_time', end.toISOString())
     }
 
-    // Filter by activity type
-    const activityType = searchParams.get('activity_type')
-    if (activityType) {
-      query = query.eq('activity_type', activityType)
-    }
-
-    // Filter by project
-    const project = searchParams.get('project')
-    if (project) {
-      query = query.eq('project', project)
+    // Filter by status type
+    const statusType = searchParams.get('status_type')
+    if (statusType) {
+      query = query.eq('status_type', statusType)
     }
 
     // Limit and pagination
@@ -218,59 +212,37 @@ async function handleGet(
 // POST - Create hourly status update
 async function handleCreate(supabase: any, userId: string, req: Request) {
   try {
-    const { 
-      activity, 
-      activity_type, 
-      project, 
-      task,
-      productivity_level,
-      mood,
-      location,
-      notes,
-      status_time
-    } = await req.json()
+    const body = await req.json()
+
+    // Map frontend fields to database fields
+    // Frontend sends: status_text, task_description
+    // DB expects: status_message, status_type
+    const status_text = body.status_text || body.status_message
+    const task_description = body.task_description
+    const status_type = body.status_type
+    const status_time = body.status_time
 
     // Validate required fields
-    if (!activity) {
+    if (!status_text) {
       return new Response(
-        JSON.stringify({ success: false, error: 'activity is required' }),
+        JSON.stringify({ success: false, error: 'status_text is required' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Validate productivity_level if provided
-    if (productivity_level && (productivity_level < 1 || productivity_level > 5)) {
-      return new Response(
-        JSON.stringify({ 
-          success: false, 
-          error: 'productivity_level must be between 1 and 5' 
-        }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
+    // Combine status_text and task_description into status_message for DB
+    let status_message = status_text
+    if (task_description) {
+      status_message = `${status_text} - ${task_description}`
     }
 
-    // Validate mood if provided
-    const validMoods = ['great', 'good', 'okay', 'tired', 'stressed', 'overwhelmed']
-    if (mood && !validMoods.includes(mood)) {
+    // Validate status_type if provided
+    const validStatusTypes = ['working', 'break', 'meeting', 'idle', 'away']
+    if (status_type && !validStatusTypes.includes(status_type)) {
       return new Response(
-        JSON.stringify({ 
-          success: false, 
-          error: `mood must be one of: ${validMoods.join(', ')}` 
-        }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Validate activity_type if provided
-    const validActivityTypes = [
-      'coding', 'meeting', 'review', 'testing', 'documentation', 
-      'planning', 'break', 'learning', 'research', 'other'
-    ]
-    if (activity_type && !validActivityTypes.includes(activity_type)) {
-      return new Response(
-        JSON.stringify({ 
-          success: false, 
-          error: `activity_type must be one of: ${validActivityTypes.join(', ')}` 
+        JSON.stringify({
+          success: false,
+          error: `status_type must be one of: ${validStatusTypes.join(', ')}`
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
@@ -281,17 +253,11 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
 
     // Create status update
     const { data, error } = await supabase
-      .from('hourly_statuses')
+      .from('hourly_status')
       .insert({
         employee_id: userId,
-        activity,
-        activity_type: activity_type || 'other',
-        project: project || null,
-        task: task || null,
-        productivity_level: productivity_level || null,
-        mood: mood || null,
-        location: location || null,
-        notes: notes || null,
+        status_message,
+        status_type: status_type || null,
         status_time: timestamp,
       })
       .select(`
@@ -333,7 +299,7 @@ async function handleUpdate(supabase: any, userId: string, statusId: string, req
 
     // Get existing status
     const { data: existing, error: fetchError } = await supabase
-      .from('hourly_statuses')
+      .from('hourly_status')
       .select('*')
       .eq('id', statusId)
       .single()
@@ -360,40 +326,58 @@ async function handleUpdate(supabase: any, userId: string, statusId: string, req
 
     if (statusTime < hourAgo) {
       return new Response(
-        JSON.stringify({ 
-          success: false, 
-          error: 'Can only edit status updates from the last hour' 
+        JSON.stringify({
+          success: false,
+          error: 'Can only edit status updates from the last hour'
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
     // Build update object
+    // Map frontend fields to database fields
     const updateData: any = {}
 
-    if (body.activity) updateData.activity = body.activity
-    if (body.activity_type) updateData.activity_type = body.activity_type
-    if (body.project !== undefined) updateData.project = body.project
-    if (body.task !== undefined) updateData.task = body.task
-    if (body.productivity_level !== undefined) {
-      if (body.productivity_level < 1 || body.productivity_level > 5) {
+    // Handle status_text or status_message
+    const status_text = body.status_text || body.status_message
+    const task_description = body.task_description
+
+    if (status_text !== undefined || task_description !== undefined) {
+      if (status_text !== undefined && !status_text) {
         return new Response(
-          JSON.stringify({ 
-            success: false, 
-            error: 'productivity_level must be between 1 and 5' 
+          JSON.stringify({ success: false, error: 'status_text cannot be empty' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+
+      // Combine status_text and task_description if both provided
+      if (status_text !== undefined && task_description !== undefined) {
+        updateData.status_message = `${status_text} - ${task_description}`
+      } else if (status_text !== undefined) {
+        updateData.status_message = status_text
+      } else if (task_description !== undefined) {
+        // If only task_description is updated, append to existing status_message
+        updateData.status_message = `${existing.status_message} - ${task_description}`
+      }
+    }
+
+    if (body.status_type !== undefined) {
+      const validStatusTypes = ['working', 'break', 'meeting', 'idle', 'away']
+      if (body.status_type && !validStatusTypes.includes(body.status_type)) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: `status_type must be one of: ${validStatusTypes.join(', ')}`
           }),
           { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         )
       }
-      updateData.productivity_level = body.productivity_level
+      updateData.status_type = body.status_type
     }
-    if (body.mood !== undefined) updateData.mood = body.mood
-    if (body.location !== undefined) updateData.location = body.location
-    if (body.notes !== undefined) updateData.notes = body.notes
 
     // Update status
     const { data, error } = await supabase
-      .from('hourly_statuses')
+      .from('hourly_status')
       .update(updateData)
       .eq('id', statusId)
       .select(`
@@ -433,7 +417,7 @@ async function handleDelete(supabase: any, userId: string, statusId: string) {
 
     // Get existing status
     const { data: existing, error: fetchError } = await supabase
-      .from('hourly_statuses')
+      .from('hourly_status')
       .select('*')
       .eq('id', statusId)
       .single()
@@ -470,7 +454,7 @@ async function handleDelete(supabase: any, userId: string, statusId: string) {
 
     // Delete status
     const { error } = await supabase
-      .from('hourly_statuses')
+      .from('hourly_status')
       .delete()
       .eq('id', statusId)
 

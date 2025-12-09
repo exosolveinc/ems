@@ -64,6 +64,7 @@ serve(async (req) => {
         return await handleCreate(supabaseAdmin, user.id, req)
       case 'PUT':
       case 'PATCH':
+        
         return await handleUpdate(supabaseAdmin, user.id, userRole, requestId, req)
       case 'DELETE':
         return await handleDelete(supabaseAdmin, user.id, userRole, requestId)
@@ -100,10 +101,6 @@ async function handleGet(
             employee_id,
             full_name,
             email
-          ),
-          reviewer:reviewed_by (
-            full_name,
-            email
           )
         `)
         .eq('id', requestId)
@@ -124,6 +121,11 @@ async function handleGet(
         )
       }
 
+      // Ensure older clients that expect `days` still receive it
+      if (data && data.total_days !== undefined && data.days === undefined) {
+        data.days = data.total_days
+      }
+
       return new Response(
         JSON.stringify({ success: true, data }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -137,10 +139,6 @@ async function handleGet(
         *,
         employees:employee_id (
           employee_id,
-          full_name,
-          email
-        ),
-        reviewer:reviewed_by (
           full_name,
           email
         )
@@ -180,8 +178,16 @@ async function handleGet(
 
     if (error) throw error
 
+    // Map total_days -> days for backward compatibility
+    const mapped = (data || []).map((item: any) => {
+      if (item && item.total_days !== undefined && item.days === undefined) {
+        item.days = item.total_days
+      }
+      return item
+    })
+
     return new Response(
-      JSON.stringify({ success: true, data, count: data.length }),
+      JSON.stringify({ success: true, data: mapped, count: mapped.length }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   } catch (error) {
@@ -222,8 +228,8 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
       )
     }
 
-    // Calculate days (inclusive)
-    const days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
+    // Calculate total_days (inclusive)
+    const total_days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
 
     // Check for overlapping requests
     const { data: overlapping } = await supabase
@@ -251,7 +257,7 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
         employee_id: userId,
         start_date,
         end_date,
-        days,
+        total_days,
         reason: reason || null,
         vacation_type: vacation_type || 'annual',
         status: 'pending',
@@ -267,6 +273,11 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
       .single()
 
     if (error) throw error
+
+    // Provide `days` alias for clients expecting that field
+    if (data && data.total_days !== undefined && data.days === undefined) {
+      data.days = data.total_days
+    }
 
     return new Response(
       JSON.stringify({ 
@@ -355,7 +366,7 @@ async function handleUpdate(supabase: any, userId: string, userRole: string, req
       updateData.vacation_type = body.vacation_type
     }
 
-    // Recalculate days if dates changed
+    // Recalculate total_days if dates changed
     if (body.start_date || body.end_date) {
       const startDate = new Date(body.start_date || existing.start_date)
       const endDate = new Date(body.end_date || existing.end_date)
@@ -367,7 +378,7 @@ async function handleUpdate(supabase: any, userId: string, userRole: string, req
         )
       }
       
-      updateData.days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
+      updateData.total_days = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
     }
 
     // Check for overlapping requests (excluding current request)
@@ -410,6 +421,10 @@ async function handleUpdate(supabase: any, userId: string, userRole: string, req
       .single()
 
     if (error) throw error
+
+    if (data && data.total_days !== undefined && data.days === undefined) {
+      data.days = data.total_days
+    }
 
     return new Response(
       JSON.stringify({ 

@@ -179,6 +179,26 @@ serve(async (req) => {
                   title: 'Missing Check-out',
                   message: `You checked in today but haven't checked out. Please check out.`,
                 })
+
+                // Auto-checkout at 6 PM EST (18:00) if not checked out
+                const autoCheckoutTime = new Date(today)
+                autoCheckoutTime.setHours(18, 0, 0, 0) // 6 PM EST
+
+                if (now >= autoCheckoutTime) {
+                  // Calculate hours from check-in to 6 PM
+                  const totalHours = (autoCheckoutTime.getTime() - new Date(checkIn.check_in_time).getTime()) / (1000 * 60 * 60)
+
+                  await supabase
+                    .from('check_outs')
+                    .insert({
+                      employee_id: employee.id,
+                      check_in_id: checkIn.id,
+                      check_out_time: autoCheckoutTime.toISOString(),
+                      check_out_notes: 'Auto-checkout - No manual checkout recorded',
+                      total_hours: Math.round(totalHours * 100) / 100,
+                    })
+                    .catch((err: any) => console.error('Error auto-checking out employee:', err))
+                }
               }
             }
           }

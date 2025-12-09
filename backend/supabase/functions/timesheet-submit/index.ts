@@ -90,10 +90,6 @@ async function handleGet(
             employee_id,
             full_name,
             email
-          ),
-          reviewer:reviewed_by (
-            full_name,
-            email
           )
         `)
         .eq('id', timesheetId)
@@ -127,10 +123,6 @@ async function handleGet(
         *,
         employees:employee_id (
           employee_id,
-          full_name,
-          email
-        ),
-        reviewer:reviewed_by (
           full_name,
           email
         )
