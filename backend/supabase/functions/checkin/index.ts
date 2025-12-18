@@ -1,18 +1,9 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-// import { StandupEntry } from '../../../shared/types/database.types'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
-export interface StandupEntry {
-  project_name: string
-  ticket_number?: string
-  task_description: string
-  confidence_score: number
-  difficulty_level: number
-  estimated_hours?: number
 }
 
 // Handle GET request to retrieve check-ins
@@ -33,22 +24,10 @@ async function handleGetCheckIns(supabase: any, userId: string, userRole: string
           department,
           designation
         ),
-        standup_entries (
-          id,
-          entry_type,
-          project_name,
-          ticket_number,
-          task_description,
-          confidence_score,
-          difficulty_level,
-          estimated_hours,
-          created_at
-        ),
         check_outs (
           id,
           check_out_time,
           check_out_location,
-          check_out_ip,
           check_out_notes,
           total_hours
         )
@@ -111,7 +90,7 @@ async function handleGetCheckIns(supabase: any, userId: string, userRole: string
 
     // Filter by work_location
     const workLocation = searchParams.get('work_location')
-    if (workLocation && (workLocation === 'home' || workLocation === 'office')) {
+    if (workLocation && ['home', 'office', 'hybrid', 'other'].includes(workLocation)) {
       query = query.eq('work_location', workLocation)
     }
 
@@ -127,11 +106,37 @@ async function handleGetCheckIns(supabase: any, userId: string, userRole: string
 
     if (error) throw error
 
+    // Fetch task details for each check-in
+    const checkInsWithTasks = await Promise.all(
+      (data || []).map(async (checkIn: any) => {
+        if (checkIn.task_ids && checkIn.task_ids.length > 0) {
+          const { data: tasks } = await supabase
+            .from('tasks')
+            .select(`
+              id,
+              task_type,
+              title,
+              ticket_number,
+              status,
+              priority,
+              project:project_id (
+                id,
+                project_name
+              )
+            `)
+            .in('id', checkIn.task_ids)
+
+          return { ...checkIn, tasks: tasks || [] }
+        }
+        return { ...checkIn, tasks: [] }
+      })
+    )
+
     return new Response(
       JSON.stringify({
         success: true,
-        data: data || [],
-        count: data?.length || 0,
+        data: checkInsWithTasks,
+        count: checkInsWithTasks.length,
         offset,
         limit
       }),
@@ -139,7 +144,7 @@ async function handleGetCheckIns(supabase: any, userId: string, userRole: string
     )
   } catch (error) {
     return new Response(
-      JSON.stringify({ success: false, error: error.message }),
+      JSON.stringify({ success: false, error: (error as Error).message }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
@@ -162,17 +167,9 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
         check_in_time,
         check_in_location,
         work_location,
-        has_blockers,
-        standup_entries (
-          id,
-          entry_type,
-          project_name,
-          ticket_number,
-          task_description,
-          confidence_score,
-          difficulty_level,
-          estimated_hours
-        )
+        task_ids,
+        confidence_score,
+        difficulty_level
       `)
       .eq('employee_id', userId)
       .gte('check_in_time', todayStart.toISOString())
@@ -194,6 +191,28 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
       )
     }
 
+    // Fetch task details
+    let tasks: any[] = []
+    if (checkin.task_ids && checkin.task_ids.length > 0) {
+      const { data: taskData } = await supabase
+        .from('tasks')
+        .select(`
+          id,
+          task_type,
+          title,
+          ticket_number,
+          status,
+          priority,
+          project:project_id (
+            id,
+            project_name
+          )
+        `)
+        .in('id', checkin.task_ids)
+
+      tasks = taskData || []
+    }
+
     // Check for checkout
     const { data: checkout } = await supabase
       .from('check_outs')
@@ -211,8 +230,10 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
           check_in_time: checkin.check_in_time,
           check_in_location: checkin.check_in_location,
           work_location: checkin.work_location,
-          has_blockers: checkin.has_blockers,
-          standup_entries: checkin.standup_entries || []
+          task_ids: checkin.task_ids,
+          tasks,
+          confidence_score: checkin.confidence_score,
+          difficulty_level: checkin.difficulty_level
         },
         check_out: checkout ? {
           id: checkout.id,
@@ -229,7 +250,7 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
     )
   } catch (error) {
     return new Response(
-      JSON.stringify({ success: false, error: error.message }),
+      JSON.stringify({ success: false, error: (error as Error).message }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
@@ -302,34 +323,62 @@ serve(async (req) => {
     }
 
     // POST request - check in
-    if (userRole !== 'employee' && userRole !== 'manager' && userRole !== 'hr') {
+    if (req.method !== 'POST') {
       return new Response(
-        JSON.stringify({ success: false, error: 'Only employees can check in' }),
-        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ success: false, error: 'Method not allowed' }),
+        { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    const { 
-      location, 
-      ip, 
-      notes,
+    const {
+      task_ids,
+      confidence_score,
+      difficulty_level,
       work_location,
-      yesterday = [],
-      today = [],
-      blockers = []
+      location,
+      notes
     } = await req.json()
 
     // Validate required fields
-    if (!work_location || !['home', 'office'].includes(work_location)) {
+    if (!work_location || !['home', 'office', 'hybrid', 'other'].includes(work_location)) {
       return new Response(
-        JSON.stringify({ success: false, error: 'work_location is required (home or office)' }),
+        JSON.stringify({ success: false, error: 'work_location is required (home, office, hybrid, or other)' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    if (!today || today.length === 0) {
+    if (!task_ids || !Array.isArray(task_ids) || task_ids.length === 0) {
       return new Response(
-        JSON.stringify({ success: false, error: 'At least one task for today is required' }),
+        JSON.stringify({ success: false, error: 'At least one task_id is required' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!confidence_score || confidence_score < 1 || confidence_score > 10) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'confidence_score is required (1-10)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!difficulty_level || difficulty_level < 1 || difficulty_level > 10) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'difficulty_level is required (1-10)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Validate that all task_ids exist
+    const { data: validTasks, error: taskError } = await supabaseAdmin
+      .from('tasks')
+      .select('id')
+      .in('id', task_ids)
+
+    if (taskError) throw taskError
+
+    if (!validTasks || validTasks.length !== task_ids.length) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'One or more task_ids are invalid' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -361,61 +410,34 @@ serve(async (req) => {
       .from('check_ins')
       .insert({
         employee_id,
-        check_in_location: location,
-        check_in_ip: ip,
-        check_in_notes: notes,
+        check_in_location: location || null,
+        check_in_notes: notes || null,
         work_location,
-        has_blockers: blockers.length > 0,
+        task_ids,
+        confidence_score,
+        difficulty_level
       })
       .select()
       .single()
 
     if (checkinError) throw checkinError
 
-    // Insert standup entries
-    const standupEntries = [
-      ...yesterday.map((entry: StandupEntry) => ({
-        check_in_id: checkin.id,
-        employee_id,
-        entry_type: 'yesterday',
-        project_name: entry.project_name,
-        ticket_number: entry.ticket_number || null,
-        task_description: entry.task_description,
-        confidence_score: entry.confidence_score,
-        difficulty_level: entry.difficulty_level,
-        estimated_hours: entry.estimated_hours || null,
-      })),
-      ...today.map((entry: StandupEntry) => ({
-        check_in_id: checkin.id,
-        employee_id,
-        entry_type: 'today',
-        project_name: entry.project_name,
-        ticket_number: entry.ticket_number || null,
-        task_description: entry.task_description,
-        confidence_score: entry.confidence_score,
-        difficulty_level: entry.difficulty_level,
-        estimated_hours: entry.estimated_hours || null,
-      })),
-      ...blockers.map((entry: StandupEntry) => ({
-        check_in_id: checkin.id,
-        employee_id,
-        entry_type: 'blocker',
-        project_name: entry.project_name,
-        ticket_number: entry.ticket_number || null,
-        task_description: entry.task_description,
-        confidence_score: entry.confidence_score || null,
-        difficulty_level: entry.difficulty_level || null,
-        estimated_hours: entry.estimated_hours || null,
-      })),
-    ]
-
-    if (standupEntries.length > 0) {
-      const { error: standupError } = await supabaseAdmin
-        .from('standup_entries')
-        .insert(standupEntries)
-
-      if (standupError) throw standupError
-    }
+    // Fetch task details for response
+    const { data: tasks } = await supabaseAdmin
+      .from('tasks')
+      .select(`
+        id,
+        task_type,
+        title,
+        ticket_number,
+        status,
+        priority,
+        project:project_id (
+          id,
+          project_name
+        )
+      `)
+      .in('id', task_ids)
 
     // Check if late and create violation (using EST)
     const checkInTimeUTC = new Date(checkin.check_in_time)
@@ -452,12 +474,8 @@ serve(async (req) => {
       JSON.stringify({
         success: true,
         data: {
-          checkin,
-          standup: {
-            yesterday: yesterday.length,
-            today: today.length,
-            blockers: blockers.length,
-          },
+          ...checkin,
+          tasks: tasks || []
         },
         employee: {
           id: employee_id,
@@ -470,7 +488,7 @@ serve(async (req) => {
     )
   } catch (error) {
     return new Response(
-      JSON.stringify({ success: false, error: error.message }),
+      JSON.stringify({ success: false, error: (error as Error).message }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
