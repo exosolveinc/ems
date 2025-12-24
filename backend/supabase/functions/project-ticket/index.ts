@@ -12,7 +12,7 @@ const TASK_TYPES = ['story', 'bug', 'task', 'epic', 'spike']
 const PRIORITIES = ['critical', 'high', 'medium', 'low']
 const STORY_POINTS = [1, 2, 3, 5, 8, 13, 21]
 const COMPLEXITIES = ['Low', 'Medium', 'High']
-const TASK_STATUSES = ['Backlog', 'Ready', 'In Progress', 'In Review', 'Done']
+const TASK_STATUSES = ['Ready', 'In Progress', 'In Review', 'Done']
 const PROJECT_STATUSES = ['active', 'inactive', 'archived']
 
 serve(async (req) => {
@@ -658,7 +658,7 @@ serve(async (req) => {
             priority: priority || 'medium',
             story_points: story_points || null,
             complexity: complexity || null,
-            status: taskStatus || 'Backlog',
+            status: taskStatus || 'Ready',
             assigned_employee_id: assigned_employee_id || null,
             reviewer_id: reviewer_id || user.id, // Default to current user as reviewer
             technology_stack: technology_stack || [],

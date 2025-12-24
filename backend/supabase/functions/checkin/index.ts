@@ -90,8 +90,26 @@ async function handleGetCheckIns(supabase: any, userId: string, userRole: string
 
     // Filter by work_location
     const workLocation = searchParams.get('work_location')
-    if (workLocation && ['home', 'office', 'hybrid', 'other'].includes(workLocation)) {
+    if (workLocation && ['home', 'office', 'apartment', 'travel'].includes(workLocation)) {
       query = query.eq('work_location', workLocation)
+    }
+
+    // Filter by mood
+    const moodFilter = searchParams.get('mood')
+    if (moodFilter && ['amazing', 'happy', 'good', 'okay', 'tired', 'stressed', 'frustrated'].includes(moodFilter)) {
+      query = query.eq('mood', moodFilter)
+    }
+
+    // Filter by health_status
+    const healthFilter = searchParams.get('health_status')
+    if (healthFilter && ['healthy', 'slight', 'sick', 'recovering', 'mental'].includes(healthFilter)) {
+      query = query.eq('health_status', healthFilter)
+    }
+
+    // Filter by workload
+    const workloadFilter = searchParams.get('workload')
+    if (workloadFilter && ['light', 'balanced', 'heavy', 'overwhelming'].includes(workloadFilter)) {
+      query = query.eq('workload', workloadFilter)
     }
 
     // Pagination
@@ -169,7 +187,16 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
         work_location,
         task_ids,
         confidence_score,
-        difficulty_level
+        difficulty_level,
+        mood,
+        health_status,
+        symptoms,
+        energy_level,
+        stress_level,
+        focus_level,
+        workload,
+        wins,
+        blockers
       `)
       .eq('employee_id', userId)
       .gte('check_in_time', todayStart.toISOString())
@@ -233,7 +260,16 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
           task_ids: checkin.task_ids,
           tasks,
           confidence_score: checkin.confidence_score,
-          difficulty_level: checkin.difficulty_level
+          difficulty_level: checkin.difficulty_level,
+          mood: checkin.mood,
+          health_status: checkin.health_status,
+          symptoms: checkin.symptoms,
+          energy_level: checkin.energy_level,
+          stress_level: checkin.stress_level,
+          focus_level: checkin.focus_level,
+          workload: checkin.workload,
+          wins: checkin.wins,
+          blockers: checkin.blockers
         },
         check_out: checkout ? {
           id: checkout.id,
@@ -335,14 +371,30 @@ serve(async (req) => {
       confidence_score,
       difficulty_level,
       work_location,
+      mood,
+      health_status,
+      symptoms,
+      energy_level,
+      stress_level,
+      focus_level,
+      workload,
+      wins,
+      blockers,
       location,
       notes
     } = await req.json()
 
+    // Valid values for enum fields
+    const validWorkLocations = ['home', 'office', 'apartment', 'travel']
+    const validMoods = ['amazing', 'happy', 'good', 'okay', 'tired', 'stressed', 'frustrated']
+    const validHealthStatuses = ['healthy', 'slight', 'sick', 'recovering', 'mental']
+    const validSymptoms = ['headache', 'fever', 'cold', 'fatigue', 'stomach', 'allergies', 'back', 'anxiety', 'burnout']
+    const validWorkloads = ['light', 'balanced', 'heavy', 'overwhelming']
+
     // Validate required fields
-    if (!work_location || !['home', 'office', 'hybrid', 'other'].includes(work_location)) {
+    if (!work_location || !validWorkLocations.includes(work_location)) {
       return new Response(
-        JSON.stringify({ success: false, error: 'work_location is required (home, office, hybrid, or other)' }),
+        JSON.stringify({ success: false, error: `work_location is required (${validWorkLocations.join(', ')})` }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -366,6 +418,72 @@ serve(async (req) => {
         JSON.stringify({ success: false, error: 'difficulty_level is required (1-10)' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
+    }
+
+    if (!mood || !validMoods.includes(mood)) {
+      return new Response(
+        JSON.stringify({ success: false, error: `mood is required (${validMoods.join(', ')})` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!health_status || !validHealthStatuses.includes(health_status)) {
+      return new Response(
+        JSON.stringify({ success: false, error: `health_status is required (${validHealthStatuses.join(', ')})` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!energy_level || energy_level < 1 || energy_level > 10) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'energy_level is required (1-10)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!stress_level || stress_level < 1 || stress_level > 10) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'stress_level is required (1-10)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!focus_level || focus_level < 1 || focus_level > 10) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'focus_level is required (1-10)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (!workload || !validWorkloads.includes(workload)) {
+      return new Response(
+        JSON.stringify({ success: false, error: `workload is required (${validWorkloads.join(', ')})` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (typeof wins !== 'string' || wins.trim() === '') {
+      return new Response(
+        JSON.stringify({ success: false, error: 'wins is required (free text)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    if (typeof blockers !== 'string' || blockers.trim() === '') {
+      return new Response(
+        JSON.stringify({ success: false, error: 'blockers is required (free text)' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Validate symptoms (optional field)
+    const validatedSymptoms: string[] = []
+    if (symptoms && Array.isArray(symptoms)) {
+      for (const symptom of symptoms) {
+        if (validSymptoms.includes(symptom)) {
+          validatedSymptoms.push(symptom)
+        }
+      }
     }
 
     // Validate that all task_ids exist
@@ -415,7 +533,16 @@ serve(async (req) => {
         work_location,
         task_ids,
         confidence_score,
-        difficulty_level
+        difficulty_level,
+        mood,
+        health_status,
+        symptoms: validatedSymptoms,
+        energy_level,
+        stress_level,
+        focus_level,
+        workload,
+        wins: wins.trim(),
+        blockers: blockers.trim()
       })
       .select()
       .single()

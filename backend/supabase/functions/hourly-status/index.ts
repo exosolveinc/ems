@@ -100,6 +100,16 @@ async function handleGet(
             employee_id,
             full_name,
             email
+          ),
+          task:task_id (
+            id,
+            title,
+            ticket_number,
+            status,
+            project:project_id (
+              id,
+              project_name
+            )
           )
         `)
         .eq('id', statusId)
@@ -135,6 +145,16 @@ async function handleGet(
           employee_id,
           full_name,
           email
+        ),
+        task:task_id (
+          id,
+          title,
+          ticket_number,
+          status,
+          project:project_id (
+            id,
+            project_name
+          )
         )
       `)
 
@@ -158,7 +178,7 @@ async function handleGet(
       startOfDay.setHours(0, 0, 0, 0)
       const endOfDay = new Date(date)
       endOfDay.setHours(23, 59, 59, 999)
-      
+
       query = query
         .gte('status_time', startOfDay.toISOString())
         .lte('status_time', endOfDay.toISOString())
@@ -176,10 +196,16 @@ async function handleGet(
       query = query.lte('status_time', end.toISOString())
     }
 
-    // Filter by status type
-    const statusType = searchParams.get('status_type')
-    if (statusType) {
-      query = query.eq('status_type', statusType)
+    // Filter by work_status
+    const workStatus = searchParams.get('work_status')
+    if (workStatus && ['progress', 'done', 'blocked'].includes(workStatus)) {
+      query = query.eq('work_status', workStatus)
+    }
+
+    // Filter by task_id
+    const taskId = searchParams.get('task_id')
+    if (taskId) {
+      query = query.eq('task_id', taskId)
     }
 
     // Limit and pagination
@@ -195,9 +221,9 @@ async function handleGet(
     if (error) throw error
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        data, 
+      JSON.stringify({
+        success: true,
+        data,
         count: data.length,
         offset,
         limit
@@ -209,43 +235,68 @@ async function handleGet(
   }
 }
 
+// Valid work status values
+const VALID_WORK_STATUSES = ['progress', 'done', 'blocked']
+
 // POST - Create hourly status update
 async function handleCreate(supabase: any, userId: string, req: Request) {
   try {
     const body = await req.json()
 
-    // Map frontend fields to database fields
-    // Frontend sends: status_text, task_description
-    // DB expects: status_message, status_type
-    const status_text = body.status_text || body.status_message
-    const task_description = body.task_description
-    const status_type = body.status_type
-    const status_time = body.status_time
+    const {
+      status_text,
+      task_id,
+      work_status,
+      blocker_description,
+      status_time
+    } = body
 
     // Validate required fields
-    if (!status_text) {
+    if (!status_text || typeof status_text !== 'string' || status_text.trim() === '') {
       return new Response(
         JSON.stringify({ success: false, error: 'status_text is required' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // Combine status_text and task_description into status_message for DB
-    let status_message = status_text
-    if (task_description) {
-      status_message = `${status_text} - ${task_description}`
-    }
-
-    // Validate status_type if provided
-    const validStatusTypes = ['working', 'break', 'meeting', 'idle', 'away']
-    if (status_type && !validStatusTypes.includes(status_type)) {
+    // Validate work_status if provided
+    if (work_status && !VALID_WORK_STATUSES.includes(work_status)) {
       return new Response(
         JSON.stringify({
           success: false,
-          error: `status_type must be one of: ${validStatusTypes.join(', ')}`
+          error: `work_status must be one of: ${VALID_WORK_STATUSES.join(', ')}`
         }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
+    }
+
+    // Validate blocker_description is provided when work_status is 'blocked'
+    if (work_status === 'blocked' && (!blocker_description || blocker_description.trim() === '')) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: 'blocker_description is required when work_status is blocked'
+        }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Validate task_id exists if provided
+    if (task_id) {
+      const { data: taskExists, error: taskError } = await supabase
+        .from('tasks')
+        .select('id')
+        .eq('id', task_id)
+        .maybeSingle()
+
+      if (taskError) throw taskError
+
+      if (!taskExists) {
+        return new Response(
+          JSON.stringify({ success: false, error: 'Invalid task_id - task not found' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
     }
 
     // Use provided status_time or current time
@@ -256,8 +307,10 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
       .from('hourly_status')
       .insert({
         employee_id: userId,
-        status_message,
-        status_type: status_type || null,
+        status_text: status_text.trim(),
+        task_id: task_id || null,
+        work_status: work_status || null,
+        blocker_description: work_status === 'blocked' ? blocker_description?.trim() : null,
         status_time: timestamp,
       })
       .select(`
@@ -266,6 +319,16 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
           employee_id,
           full_name,
           email
+        ),
+        task:task_id (
+          id,
+          title,
+          ticket_number,
+          status,
+          project:project_id (
+            id,
+            project_name
+          )
         )
       `)
       .single()
@@ -335,44 +398,74 @@ async function handleUpdate(supabase: any, userId: string, statusId: string, req
     }
 
     // Build update object
-    // Map frontend fields to database fields
     const updateData: any = {}
 
-    // Handle status_text or status_message
-    const status_text = body.status_text || body.status_message
-    const task_description = body.task_description
-
-    if (status_text !== undefined || task_description !== undefined) {
-      if (status_text !== undefined && !status_text) {
+    // Handle status_text
+    if (body.status_text !== undefined) {
+      if (!body.status_text || body.status_text.trim() === '') {
         return new Response(
           JSON.stringify({ success: false, error: 'status_text cannot be empty' }),
           { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         )
       }
-
-      // Combine status_text and task_description if both provided
-      if (status_text !== undefined && task_description !== undefined) {
-        updateData.status_message = `${status_text} - ${task_description}`
-      } else if (status_text !== undefined) {
-        updateData.status_message = status_text
-      } else if (task_description !== undefined) {
-        // If only task_description is updated, append to existing status_message
-        updateData.status_message = `${existing.status_message} - ${task_description}`
-      }
+      updateData.status_text = body.status_text.trim()
     }
 
-    if (body.status_type !== undefined) {
-      const validStatusTypes = ['working', 'break', 'meeting', 'idle', 'away']
-      if (body.status_type && !validStatusTypes.includes(body.status_type)) {
+    // Handle task_id
+    if (body.task_id !== undefined) {
+      if (body.task_id) {
+        const { data: taskExists, error: taskError } = await supabase
+          .from('tasks')
+          .select('id')
+          .eq('id', body.task_id)
+          .maybeSingle()
+
+        if (taskError) throw taskError
+
+        if (!taskExists) {
+          return new Response(
+            JSON.stringify({ success: false, error: 'Invalid task_id - task not found' }),
+            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+          )
+        }
+      }
+      updateData.task_id = body.task_id || null
+    }
+
+    // Handle work_status
+    if (body.work_status !== undefined) {
+      if (body.work_status && !VALID_WORK_STATUSES.includes(body.work_status)) {
         return new Response(
           JSON.stringify({
             success: false,
-            error: `status_type must be one of: ${validStatusTypes.join(', ')}`
+            error: `work_status must be one of: ${VALID_WORK_STATUSES.join(', ')}`
           }),
           { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         )
       }
-      updateData.status_type = body.status_type
+      updateData.work_status = body.work_status || null
+    }
+
+    // Handle blocker_description
+    const finalWorkStatus = body.work_status !== undefined ? body.work_status : existing.work_status
+    if (body.blocker_description !== undefined || finalWorkStatus === 'blocked') {
+      if (finalWorkStatus === 'blocked' && (!body.blocker_description || body.blocker_description.trim() === '')) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: 'blocker_description is required when work_status is blocked'
+          }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+      updateData.blocker_description = finalWorkStatus === 'blocked' ? body.blocker_description?.trim() : null
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return new Response(
+        JSON.stringify({ success: false, error: 'No fields to update' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
     }
 
     // Update status
@@ -386,6 +479,16 @@ async function handleUpdate(supabase: any, userId: string, statusId: string, req
           employee_id,
           full_name,
           email
+        ),
+        task:task_id (
+          id,
+          title,
+          ticket_number,
+          status,
+          project:project_id (
+            id,
+            project_name
+          )
         )
       `)
       .single()
