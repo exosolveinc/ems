@@ -88,30 +88,6 @@ async function handleGetCheckIns(supabase: any, userId: string, userRole: string
       query = query.lte('check_in_time', end.toISOString())
     }
 
-    // Filter by work_location
-    const workLocation = searchParams.get('work_location')
-    if (workLocation && ['home', 'office', 'apartment', 'travel'].includes(workLocation)) {
-      query = query.eq('work_location', workLocation)
-    }
-
-    // Filter by mood
-    const moodFilter = searchParams.get('mood')
-    if (moodFilter && ['amazing', 'happy', 'good', 'okay', 'tired', 'stressed', 'frustrated'].includes(moodFilter)) {
-      query = query.eq('mood', moodFilter)
-    }
-
-    // Filter by health_status
-    const healthFilter = searchParams.get('health_status')
-    if (healthFilter && ['healthy', 'slight', 'sick', 'recovering', 'mental'].includes(healthFilter)) {
-      query = query.eq('health_status', healthFilter)
-    }
-
-    // Filter by workload
-    const workloadFilter = searchParams.get('workload')
-    if (workloadFilter && ['light', 'balanced', 'heavy', 'overwhelming'].includes(workloadFilter)) {
-      query = query.eq('workload', workloadFilter)
-    }
-
     // Pagination
     const limit = parseInt(searchParams.get('limit') || '50')
     const offset = parseInt(searchParams.get('offset') || '0')
@@ -183,20 +159,7 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
       .select(`
         id,
         check_in_time,
-        check_in_location,
-        work_location,
-        task_ids,
-        confidence_score,
-        difficulty_level,
-        mood,
-        health_status,
-        symptoms,
-        energy_level,
-        stress_level,
-        focus_level,
-        workload,
-        wins,
-        blockers
+        task_ids
       `)
       .eq('employee_id', userId)
       .gte('check_in_time', todayStart.toISOString())
@@ -255,21 +218,8 @@ async function handleCheckStatus(supabase: any, userId: string, employee: any) {
         check_in: {
           id: checkin.id,
           check_in_time: checkin.check_in_time,
-          check_in_location: checkin.check_in_location,
-          work_location: checkin.work_location,
           task_ids: checkin.task_ids,
-          tasks,
-          confidence_score: checkin.confidence_score,
-          difficulty_level: checkin.difficulty_level,
-          mood: checkin.mood,
-          health_status: checkin.health_status,
-          symptoms: checkin.symptoms,
-          energy_level: checkin.energy_level,
-          stress_level: checkin.stress_level,
-          focus_level: checkin.focus_level,
-          workload: checkin.workload,
-          wins: checkin.wins,
-          blockers: checkin.blockers
+          tasks
         },
         check_out: checkout ? {
           id: checkout.id,
@@ -328,10 +278,10 @@ serve(async (req) => {
       )
     }
 
-    // Get user role from employees table
+    // Get user role and work schedule from employees table
     const { data: employee } = await supabaseAdmin
       .from('employees')
-      .select('role, employee_id, full_name')
+      .select('role, employee_id, full_name, work_start_time, work_end_time, work_days')
       .eq('id', user.id)
       .single()
 
@@ -366,124 +316,14 @@ serve(async (req) => {
       )
     }
 
-    const {
-      task_ids,
-      confidence_score,
-      difficulty_level,
-      work_location,
-      mood,
-      health_status,
-      symptoms,
-      energy_level,
-      stress_level,
-      focus_level,
-      workload,
-      wins,
-      blockers,
-      location,
-      notes
-    } = await req.json()
-
-    // Valid values for enum fields
-    const validWorkLocations = ['home', 'office', 'apartment', 'travel']
-    const validMoods = ['amazing', 'happy', 'good', 'okay', 'tired', 'stressed', 'frustrated']
-    const validHealthStatuses = ['healthy', 'slight', 'sick', 'recovering', 'mental']
-    const validSymptoms = ['headache', 'fever', 'cold', 'fatigue', 'stomach', 'allergies', 'back', 'anxiety', 'burnout']
-    const validWorkloads = ['light', 'balanced', 'heavy', 'overwhelming']
+    const { task_ids } = await req.json()
 
     // Validate required fields
-    if (!work_location || !validWorkLocations.includes(work_location)) {
-      return new Response(
-        JSON.stringify({ success: false, error: `work_location is required (${validWorkLocations.join(', ')})` }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
     if (!task_ids || !Array.isArray(task_ids) || task_ids.length === 0) {
       return new Response(
         JSON.stringify({ success: false, error: 'At least one task_id is required' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
-    }
-
-    if (!confidence_score || confidence_score < 1 || confidence_score > 10) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'confidence_score is required (1-10)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!difficulty_level || difficulty_level < 1 || difficulty_level > 10) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'difficulty_level is required (1-10)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!mood || !validMoods.includes(mood)) {
-      return new Response(
-        JSON.stringify({ success: false, error: `mood is required (${validMoods.join(', ')})` }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!health_status || !validHealthStatuses.includes(health_status)) {
-      return new Response(
-        JSON.stringify({ success: false, error: `health_status is required (${validHealthStatuses.join(', ')})` }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!energy_level || energy_level < 1 || energy_level > 10) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'energy_level is required (1-10)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!stress_level || stress_level < 1 || stress_level > 10) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'stress_level is required (1-10)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!focus_level || focus_level < 1 || focus_level > 10) {
-      return new Response(
-        JSON.stringify({ success: false, error: 'focus_level is required (1-10)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (!workload || !validWorkloads.includes(workload)) {
-      return new Response(
-        JSON.stringify({ success: false, error: `workload is required (${validWorkloads.join(', ')})` }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (typeof wins !== 'string' || wins.trim() === '') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'wins is required (free text)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    if (typeof blockers !== 'string' || blockers.trim() === '') {
-      return new Response(
-        JSON.stringify({ success: false, error: 'blockers is required (free text)' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Validate symptoms (optional field)
-    const validatedSymptoms: string[] = []
-    if (symptoms && Array.isArray(symptoms)) {
-      for (const symptom of symptoms) {
-        if (validSymptoms.includes(symptom)) {
-          validatedSymptoms.push(symptom)
-        }
-      }
     }
 
     // Validate that all task_ids exist
@@ -528,21 +368,7 @@ serve(async (req) => {
       .from('check_ins')
       .insert({
         employee_id,
-        check_in_location: location || null,
-        check_in_notes: notes || null,
-        work_location,
-        task_ids,
-        confidence_score,
-        difficulty_level,
-        mood,
-        health_status,
-        symptoms: validatedSymptoms,
-        energy_level,
-        stress_level,
-        focus_level,
-        workload,
-        wins: wins.trim(),
-        blockers: blockers.trim()
+        task_ids
       })
       .select()
       .single()
@@ -569,31 +395,48 @@ serve(async (req) => {
     // Check if late and create violation (using EST)
     const checkInTimeUTC = new Date(checkin.check_in_time)
     const checkInTime = new Date(checkInTimeUTC.toLocaleString('en-US', { timeZone: 'America/New_York' }))
-    const workStart = new Date(checkInTime)
-    workStart.setHours(9, 0, 0, 0)
+
+    // Get day of week in EST (lowercase)
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+    const todayDayName = dayNames[checkInTime.getDay()]
+
+    // Get employee's work schedule (with defaults)
+    const workDays: string[] = employee.work_days || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']
+    const workStartTime: string = employee.work_start_time || '09:00:00'
+
+    // Parse work start time (HH:MM:SS format)
+    const [startHour, startMinute] = workStartTime.split(':').map(Number)
 
     let violation = null
-    if (checkInTime > workStart) {
-      const minutesLate = Math.floor((checkInTime.getTime() - workStart.getTime()) / (1000 * 60))
 
-      let severity = 'low'
-      if (minutesLate > 60) severity = 'high'
-      else if (minutesLate > 30) severity = 'medium'
+    // Only check for late violation if today is a work day
+    if (workDays.includes(todayDayName)) {
+      const workStart = new Date(checkInTime)
+      workStart.setHours(startHour, startMinute, 0, 0)
 
-      await supabaseAdmin
-        .from('violations')
-        .insert({
-          employee_id,
-          violation_type: 'late_checkin',
-          violation_date: new Date().toISOString().split('T')[0],
+      if (checkInTime > workStart) {
+        const minutesLate = Math.floor((checkInTime.getTime() - workStart.getTime()) / (1000 * 60))
+
+        let severity = 'low'
+        if (minutesLate > 60) severity = 'high'
+        else if (minutesLate > 30) severity = 'medium'
+
+        await supabaseAdmin
+          .from('violations')
+          .insert({
+            employee_id,
+            violation_type: 'late_checkin',
+            violation_date: new Date().toISOString().split('T')[0],
+            severity,
+            description: `Checked in ${minutesLate} minutes late (work starts at ${workStartTime.slice(0, 5)})`,
+          })
+
+        violation = {
+          created: true,
           severity,
-          description: `Checked in ${minutesLate} minutes late`,
-        })
-
-      violation = {
-        created: true,
-        severity,
-        minutes_late: minutesLate,
+          minutes_late: minutesLate,
+          work_start_time: workStartTime.slice(0, 5),
+        }
       }
     }
 

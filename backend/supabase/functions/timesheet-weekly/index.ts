@@ -11,46 +11,46 @@ const WORK_START_HOUR = 9  // 9 AM
 const WORK_END_HOUR = 17   // 5 PM
 const HOURS_PER_DAY = WORK_END_HOUR - WORK_START_HOUR // 8 hours
 
-// Timezone configuration
-// EST is UTC-5, EDT (daylight saving) is UTC-4
-// For simplicity, using EST offset (-5 hours)
-const EST_OFFSET_HOURS = -5
-
-// Convert UTC timestamp to EST Date
-function utcToEst(utcTimestamp: string): Date {
-  const utcDate = new Date(utcTimestamp)
-  // Add EST offset (which is negative, so we subtract hours)
-  const estDate = new Date(utcDate.getTime() + (EST_OFFSET_HOURS * 60 * 60 * 1000))
-  return estDate
+// Convert any timestamp to EST using proper timezone conversion
+function toEstDate(timestamp: string): Date {
+  const date = new Date(timestamp)
+  // Use toLocaleString to convert to EST, then parse back
+  const estString = date.toLocaleString('en-US', { timeZone: 'America/New_York' })
+  return new Date(estString)
 }
 
 // Get date string in EST (YYYY-MM-DD)
-function getEstDateString(timestamp: string, isEstStored: boolean = false): string {
-  if (isEstStored) {
-    // Check-in data is already in EST, just extract the date part
-    const date = new Date(timestamp)
-    return date.toISOString().split('T')[0]
-  } else {
-    // Hourly status is in UTC, convert to EST first
-    const estDate = utcToEst(timestamp)
-    return estDate.toISOString().split('T')[0]
-  }
+function getEstDateString(timestamp: string): string {
+  const estDate = toEstDate(timestamp)
+  const year = estDate.getFullYear()
+  const month = String(estDate.getMonth() + 1).padStart(2, '0')
+  const day = String(estDate.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
-// Get hour in EST from a timestamp
-function getEstHour(timestamp: string, isEstStored: boolean = false): number {
-  if (isEstStored) {
-    // Check-in data is already in EST
-    return new Date(timestamp).getHours()
-  } else {
-    // Hourly status is in UTC, convert to EST
-    const estDate = utcToEst(timestamp)
-    return estDate.getUTCHours()
-  }
+// Get hour in EST from a timestamp (converts from UTC)
+function getEstHour(timestamp: string): number {
+  const estDate = toEstDate(timestamp)
+  return estDate.getHours()
+}
+
+// Get date string from a timestamp already stored in EST (no conversion needed)
+function getDateStringFromEst(timestamp: string): string {
+  const date = new Date(timestamp)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+// Get hour from a timestamp already stored in EST (no conversion needed)
+function getHourFromEst(timestamp: string): number {
+  const date = new Date(timestamp)
+  return date.getHours()
 }
 
 // Hour status types
-type HourStatus = 'worked' | 'blocked' | 'gap' | 'no-checkin'
+type HourStatus = 'worked' | 'blocked' | 'gap' | 'no-checkin' | 'break'
 
 interface HourBlock {
   hour: number
@@ -73,6 +73,7 @@ interface DayData {
   hours_expected: number
   hours_blocked: number
   hours_gap: number
+  hours_break: number
   hour_blocks: HourBlock[]
 }
 
@@ -86,6 +87,7 @@ interface EmployeeTimesheet {
   total_hours_expected: number
   total_hours_blocked: number
   total_hours_gap: number
+  total_hours_break: number
 }
 
 // Helper to format hour to AM/PM
@@ -324,7 +326,7 @@ serve(async (req) => {
     // Fetch employee details
     const { data: employees } = await supabaseAdmin
       .from('employees')
-      .select('id, employee_id, full_name, email')
+      .select('id, employee_id, full_name, first_name, last_name, email')
       .in('id', employeeIds)
 
     // Build the response
@@ -339,16 +341,21 @@ serve(async (req) => {
       let totalExpected = 0
       let totalBlocked = 0
       let totalGap = 0
+      let totalBreak = 0
 
       // Process each day (Mon-Fri)
       for (let i = 0; i < 5; i++) {
         const currentDate = new Date(weekStart)
         currentDate.setDate(weekStart.getDate() + i)
-        const dateStr = currentDate.toISOString().split('T')[0]
+        // Use consistent date format (YYYY-MM-DD) for comparison
+        const year = currentDate.getFullYear()
+        const month = String(currentDate.getMonth() + 1).padStart(2, '0')
+        const day = String(currentDate.getDate()).padStart(2, '0')
+        const dateStr = `${year}-${month}-${day}`
 
-        // Find check-in for this day (check-ins are stored in EST)
+        // Find check-in for this day (check_in_time is stored in EST)
         const dayCheckIn = empCheckIns.find((c: any) => {
-          const checkInDate = getEstDateString(c.check_in_time, true) // true = EST stored
+          const checkInDate = getEstDateString(c.check_in_time)
           return checkInDate === dateStr
         })
 
@@ -357,9 +364,9 @@ serve(async (req) => {
         const checkOut = dayCheckIn?.check_outs?.[0]
         const checkOutTime = checkOut?.check_out_time || null
 
-        // Get hourly statuses for this day (statuses are stored in UTC, convert to EST)
+        // Get hourly statuses for this day (status_time is already stored in EST)
         const dayStatuses = empStatuses.filter((s: any) => {
-          const statusDate = getEstDateString(s.status_time, false) // false = UTC stored
+          const statusDate = getDateStringFromEst(s.status_time)
           return statusDate === dateStr
         })
 
@@ -368,11 +375,12 @@ serve(async (req) => {
         let dayWorked = 0
         let dayBlocked = 0
         let dayGap = 0
+        let dayBreak = 0
 
         for (let hour = WORK_START_HOUR; hour < WORK_END_HOUR; hour++) {
-          // Find status for this hour (statuses are in UTC, convert to EST hour)
+          // Find status for this hour (status_time is already stored in EST)
           const hourStatus = dayStatuses.find((s: any) => {
-            const statusHour = getEstHour(s.status_time, false) // false = UTC stored
+            const statusHour = getHourFromEst(s.status_time)
             return statusHour === hour
           })
 
@@ -381,10 +389,13 @@ serve(async (req) => {
           let taskTitle: string | null = null
           let ticketNumber: string | null = null
 
-          if (!isCheckedIn) {
-            status = 'no-checkin'
-          } else if (hourStatus) {
-            if (hourStatus.work_status === 'blocked') {
+          // Prioritize hourly status data - show work even without check-in
+          if (hourStatus) {
+            if (hourStatus.work_status === 'break') {
+              status = 'break'
+              statusText = hourStatus.status_text || 'On break'
+              dayBreak++
+            } else if (hourStatus.work_status === 'blocked') {
               status = 'blocked'
               statusText = hourStatus.blocker_description || hourStatus.status_text
               dayBlocked++
@@ -402,31 +413,28 @@ serve(async (req) => {
               ticketNumber = hourStatus.task?.ticket_number || null
               dayWorked++
             }
-          } else {
-            // No status for this hour
-            if (isCheckedIn) {
-              // Check if within check-in/check-out time range
-              // Check-in times are stored in EST, so get the hour directly
-              const checkInHour = checkInTime ? getEstHour(checkInTime, true) : null
-              const checkOutHour = checkOutTime ? getEstHour(checkOutTime, true) : null
+          } else if (isCheckedIn) {
+            // No status for this hour but checked in - mark as gap
+            const checkInHour = checkInTime ? getEstHour(checkInTime) : null
+            const checkOutHour = checkOutTime ? getEstHour(checkOutTime) : null
 
-              if (checkInHour !== null && hour >= checkInHour) {
-                if (checkOutHour === null || hour < checkOutHour) {
-                  status = 'gap'
-                  dayGap++
-                } else {
-                  // After check-out, still mark as gap for accountability
-                  status = 'gap'
-                  dayGap++
-                }
+            if (checkInHour !== null && hour >= checkInHour) {
+              if (checkOutHour === null || hour < checkOutHour) {
+                status = 'gap'
+                dayGap++
               } else {
-                // Before check-in hour
+                // After check-out
                 status = 'gap'
                 dayGap++
               }
             } else {
-              status = 'no-checkin'
+              // Before check-in hour
+              status = 'gap'
+              dayGap++
             }
+          } else {
+            // No status and no check-in
+            status = 'no-checkin'
           }
 
           hourBlocks.push({
@@ -440,7 +448,9 @@ serve(async (req) => {
           })
         }
 
-        const hoursExpected = isCheckedIn ? HOURS_PER_DAY : 0
+        // Expected hours: if checked in OR has any hourly status for the day
+        const hasActivity = isCheckedIn || dayStatuses.length > 0
+        const hoursExpected = hasActivity ? HOURS_PER_DAY : 0
 
         days.push({
           date: dateStr,
@@ -453,6 +463,7 @@ serve(async (req) => {
           hours_expected: hoursExpected,
           hours_blocked: dayBlocked,
           hours_gap: dayGap,
+          hours_break: dayBreak,
           hour_blocks: hourBlocks,
         })
 
@@ -460,18 +471,27 @@ serve(async (req) => {
         totalExpected += hoursExpected
         totalBlocked += dayBlocked
         totalGap += dayGap
+        totalBreak += dayBreak
       }
+
+      // Get employee name: prefer full_name, fallback to first_name + last_name
+      const employeeName = emp.full_name
+        || (emp.first_name && emp.last_name ? `${emp.first_name} ${emp.last_name}` : null)
+        || emp.first_name
+        || emp.last_name
+        || 'Unknown'
 
       employeeTimesheets.push({
         employee_id: emp.employee_id || '',
-        employee_name: emp.full_name || 'Unknown',
-        employee_initials: getInitials(emp.full_name),
+        employee_name: employeeName,
+        employee_initials: getInitials(employeeName),
         email: emp.email || '',
         days,
         total_hours_worked: totalWorked,
         total_hours_expected: totalExpected,
         total_hours_blocked: totalBlocked,
         total_hours_gap: totalGap,
+        total_hours_break: totalBreak,
       })
     }
 
@@ -481,6 +501,7 @@ serve(async (req) => {
       total_hours_worked: employeeTimesheets.reduce((sum, e) => sum + e.total_hours_worked, 0),
       total_hours_gap: employeeTimesheets.reduce((sum, e) => sum + e.total_hours_gap, 0),
       total_hours_blocked: employeeTimesheets.reduce((sum, e) => sum + e.total_hours_blocked, 0),
+      total_hours_break: employeeTimesheets.reduce((sum, e) => sum + e.total_hours_break, 0),
     }
 
     return new Response(

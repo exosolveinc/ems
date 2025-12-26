@@ -6,32 +6,23 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-interface ViolationConfig {
-  workStartHour: number
-  workStartMinute: number
-  workEndHour: number
-  workEndMinute: number
-  lateThresholdMinutes: number
-  lowSeverityThreshold: number
-  mediumSeverityThreshold: number
-  highSeverityThreshold: number
-}
+// Default work schedule (used if employee has no custom schedule)
+const DEFAULT_WORK_START = '09:00:00'
+const DEFAULT_WORK_END = '17:00:00'
+const DEFAULT_WORK_DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']
 
-const DEFAULT_CONFIG: ViolationConfig = {
-  workStartHour: 9,
-  workStartMinute: 0,
-  workEndHour: 17,
-  workEndMinute: 0,
-  lateThresholdMinutes: 5,
-  lowSeverityThreshold: 15,
-  mediumSeverityThreshold: 30,
-  highSeverityThreshold: 60,
-}
+// Severity thresholds (in minutes)
+const LATE_THRESHOLD_LOW = 15
+const LATE_THRESHOLD_MEDIUM = 30
+const LATE_THRESHOLD_HIGH = 60
 
-// Check if a date is a weekday (Monday-Friday)
-function isWeekday(date: Date): boolean {
-  const day = date.getDay()
-  return day >= 1 && day <= 5 // 1 = Monday, 5 = Friday
+// Day names for mapping
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+
+// Parse time string (HH:MM:SS or HH:MM) to hours and minutes
+function parseTime(timeStr: string): { hour: number; minute: number } {
+  const [hour, minute] = timeStr.split(':').map(Number)
+  return { hour, minute }
 }
 
 // Check if employee has approved vacation for a specific date
@@ -48,6 +39,32 @@ async function hasApprovedVacation(supabase: any, employeeId: string, date: stri
   return !!data
 }
 
+// Get severity based on minutes late
+function getLateSeverity(minutesLate: number): string {
+  if (minutesLate > LATE_THRESHOLD_HIGH) return 'high'
+  if (minutesLate > LATE_THRESHOLD_MEDIUM) return 'medium'
+  if (minutesLate > LATE_THRESHOLD_LOW) return 'low'
+  return 'none'
+}
+
+// Check if violation already exists
+async function violationExists(
+  supabase: any,
+  employeeId: string,
+  violationType: string,
+  violationDate: string
+): Promise<boolean> {
+  const { data } = await supabase
+    .from('violations')
+    .select('id')
+    .eq('employee_id', employeeId)
+    .eq('violation_type', violationType)
+    .eq('violation_date', violationDate)
+    .maybeSingle()
+
+  return !!data
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -59,19 +76,20 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    // Parse request body for optional date parameter
+    // Parse request body for optional parameters
     let targetDate: Date
-    let checkEndOfDay = false
+    let checkType: 'realtime' | 'end_of_day' | 'hourly_status' = 'realtime'
 
     if (req.method === 'POST') {
       try {
         const body = await req.json()
         if (body.date) {
-          // Check for a specific date (e.g., yesterday for end-of-day processing)
           targetDate = new Date(body.date)
-          checkEndOfDay = body.check_end_of_day === true
         } else {
           targetDate = new Date()
+        }
+        if (body.check_type) {
+          checkType = body.check_type
         }
       } catch {
         targetDate = new Date()
@@ -81,31 +99,18 @@ serve(async (req) => {
     }
 
     // Convert to EST
+    const nowUTC = new Date()
+    const nowEST = new Date(nowUTC.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+
     const estTime = new Date(targetDate.toLocaleString('en-US', { timeZone: 'America/New_York' }))
     estTime.setHours(0, 0, 0, 0)
     const targetDateStr = estTime.toISOString().split('T')[0]
+    const todayDayName = DAY_NAMES[estTime.getDay()]
 
-    // Skip weekends (Saturday = 6, Sunday = 0)
-    if (!isWeekday(estTime)) {
-      return new Response(
-        JSON.stringify({
-          success: true,
-          message: `Skipping violation check - ${targetDateStr} is a weekend`,
-          summary: {
-            employees_checked: 0,
-            violations_created: 0,
-            notifications_sent: 0,
-            escalations: 0,
-          },
-        }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // Get all active employees
+    // Get all active employees with their work schedules
     const { data: employees, error: empError } = await supabase
       .from('employees')
-      .select('id, employee_id, full_name, first_name, last_name')
+      .select('id, employee_id, full_name, first_name, last_name, manager_id, work_start_time, work_end_time, work_days')
       .eq('status', 'active')
 
     if (empError) throw empError
@@ -113,19 +118,44 @@ serve(async (req) => {
     const violations: any[] = []
     const notifications: any[] = []
     const skippedEmployees: string[] = []
+    const processedEmployees: string[] = []
 
-    // Check each employee
+    // Process each employee
     for (const employee of employees || []) {
       const employeeName = employee.full_name || `${employee.first_name} ${employee.last_name}`
 
-      // Check if employee has approved vacation for this date
-      const onVacation = await hasApprovedVacation(supabase, employee.id, targetDateStr)
-      if (onVacation) {
-        skippedEmployees.push(employeeName)
-        continue // Skip this employee - they have approved leave
+      // Get employee's work schedule (with defaults)
+      const workDays: string[] = employee.work_days || DEFAULT_WORK_DAYS
+      const workStartTime: string = employee.work_start_time || DEFAULT_WORK_START
+      const workEndTime: string = employee.work_end_time || DEFAULT_WORK_END
+
+      // Check if today is a work day for this employee
+      if (!workDays.includes(todayDayName)) {
+        skippedEmployees.push(`${employeeName} (not a work day)`)
+        continue
       }
 
-      // Check for existing check-in
+      // Check if employee has approved vacation
+      const onVacation = await hasApprovedVacation(supabase, employee.id, targetDateStr)
+      if (onVacation) {
+        skippedEmployees.push(`${employeeName} (on vacation)`)
+        continue
+      }
+
+      processedEmployees.push(employeeName)
+
+      // Parse work times
+      const { hour: startHour, minute: startMinute } = parseTime(workStartTime)
+      const { hour: endHour, minute: endMinute } = parseTime(workEndTime)
+
+      // Create work start/end Date objects in EST
+      const workStart = new Date(estTime)
+      workStart.setHours(startHour, startMinute, 0, 0)
+
+      const workEnd = new Date(estTime)
+      workEnd.setHours(endHour, endMinute, 0, 0)
+
+      // Get employee's check-in for target date
       const { data: checkIn } = await supabase
         .from('check_ins')
         .select('id, check_in_time')
@@ -134,168 +164,191 @@ serve(async (req) => {
         .lt('check_in_time', new Date(estTime.getTime() + 24 * 60 * 60 * 1000).toISOString())
         .maybeSingle()
 
-      const workStart = new Date(estTime)
-      workStart.setHours(DEFAULT_CONFIG.workStartHour, DEFAULT_CONFIG.workStartMinute, 0, 0)
-
-      const workEnd = new Date(estTime)
-      workEnd.setHours(DEFAULT_CONFIG.workEndHour, DEFAULT_CONFIG.workEndMinute, 0, 0)
-
-      const now = new Date()
-      const nowEST = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
-
-      // For end-of-day checks (scheduled job), check the entire day
-      // For real-time checks, only check if we're past work start time
-      const shouldCheckViolations = checkEndOfDay || nowEST > workStart
-
-      if (shouldCheckViolations) {
+      // ============================================
+      // CHECK TYPE: END OF DAY (scheduled at 11 PM)
+      // ============================================
+      if (checkType === 'end_of_day') {
+        // 1. Missing check-in violation
         if (!checkIn) {
-          // Missing check-in violation - only create if workday has ended or significant time has passed
-          const hoursLate = checkEndOfDay
-            ? 8 // Full workday missed
-            : (nowEST.getTime() - workStart.getTime()) / (1000 * 60 * 60)
+          if (!(await violationExists(supabase, employee.id, 'no_checkin', targetDateStr))) {
+            violations.push({
+              employee_id: employee.id,
+              violation_type: 'no_checkin',
+              violation_date: targetDateStr,
+              severity: 'critical',
+              description: `No check-in recorded for ${targetDateStr}. Work starts at ${workStartTime.slice(0, 5)}.`,
+            })
 
-          // Only create no_checkin violation if it's end of day check OR more than 2 hours late
-          if (checkEndOfDay || hoursLate > 2) {
-            let severity = 'high'
-            if (checkEndOfDay) severity = 'critical' // Missed entire day
+            notifications.push({
+              employee_id: employee.id,
+              type: 'violation',
+              title: 'Missing Check-in Violation',
+              message: `You did not check in on ${targetDateStr}. A violation has been recorded.`,
+            })
+          }
+        } else {
+          // 2. Missing check-out violation
+          const { data: checkOut } = await supabase
+            .from('check_outs')
+            .select('id')
+            .eq('check_in_id', checkIn.id)
+            .maybeSingle()
 
-            // Check if violation already exists for this date
-            const { data: existingViolation } = await supabase
-              .from('violations')
-              .select('id')
-              .eq('employee_id', employee.id)
-              .eq('violation_type', 'no_checkin')
-              .eq('violation_date', targetDateStr)
-              .maybeSingle()
-
-            if (!existingViolation) {
+          if (!checkOut) {
+            if (!(await violationExists(supabase, employee.id, 'no_checkout', targetDateStr))) {
+              const checkInTime = new Date(checkIn.check_in_time)
               violations.push({
                 employee_id: employee.id,
-                violation_type: 'no_checkin',
+                violation_type: 'no_checkout',
                 violation_date: targetDateStr,
-                severity,
-                description: checkEndOfDay
-                  ? `No check-in recorded for the entire workday (${targetDateStr})`
-                  : `No check-in recorded. Work started ${hoursLate.toFixed(1)} hours ago.`,
+                severity: 'high',
+                description: `No check-out recorded for ${targetDateStr}. Checked in at ${checkInTime.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })}.`,
               })
 
               notifications.push({
                 employee_id: employee.id,
                 type: 'violation',
-                title: 'Missing Check-in',
-                message: checkEndOfDay
-                  ? `You did not check in on ${targetDateStr}. A violation has been recorded.`
-                  : `You have not checked in today. Please check in as soon as possible.`,
+                title: 'Missing Check-out Violation',
+                message: `You did not check out on ${targetDateStr}. A violation has been recorded.`,
               })
+
+              // Auto-checkout at work end time
+              const autoCheckoutTime = new Date(workEnd)
+              const totalHours = (autoCheckoutTime.getTime() - checkInTime.getTime()) / (1000 * 60 * 60)
+
+              if (totalHours > 0 && totalHours < 16) {
+                await supabase
+                  .from('check_outs')
+                  .insert({
+                    employee_id: employee.id,
+                    check_in_id: checkIn.id,
+                    check_out_time: autoCheckoutTime.toISOString(),
+                    check_out_notes: 'Auto-checkout - No manual checkout recorded',
+                    total_hours: Math.round(totalHours * 100) / 100,
+                  })
+              }
             }
           }
-        } else {
-          // Check for late check-in
+
+          // 3. Missed hourly status updates
+          // Count expected status updates (one per work hour)
           const checkInTime = new Date(checkIn.check_in_time)
-          const minutesLate = Math.floor((checkInTime.getTime() - workStart.getTime()) / (1000 * 60))
+          const checkInHour = checkInTime.getHours()
+          const effectiveStartHour = Math.max(checkInHour, startHour)
+          const expectedStatusCount = endHour - effectiveStartHour
 
-          if (minutesLate > DEFAULT_CONFIG.lateThresholdMinutes) {
-            let severity = 'low'
-            if (minutesLate > DEFAULT_CONFIG.lowSeverityThreshold) severity = 'medium'
-            if (minutesLate > DEFAULT_CONFIG.mediumSeverityThreshold) severity = 'high'
-            if (minutesLate > DEFAULT_CONFIG.highSeverityThreshold) severity = 'critical'
-
-            // Check if late check-in violation already exists
-            const { data: existingViolation } = await supabase
-              .from('violations')
-              .select('id')
+          if (expectedStatusCount > 0) {
+            // Get actual hourly status count for the day
+            const { data: hourlyStatuses } = await supabase
+              .from('hourly_status')
+              .select('id, status_time')
               .eq('employee_id', employee.id)
-              .eq('violation_type', 'late_checkin')
-              .eq('violation_date', targetDateStr)
-              .maybeSingle()
+              .gte('status_time', estTime.toISOString())
+              .lt('status_time', new Date(estTime.getTime() + 24 * 60 * 60 * 1000).toISOString())
 
-            if (!existingViolation) {
-              violations.push({
-                employee_id: employee.id,
-                violation_type: 'late_checkin',
-                violation_date: targetDateStr,
-                severity,
-                description: `Checked in ${minutesLate} minutes late`,
-              })
-            }
-          }
+            const actualStatusCount = (hourlyStatuses || []).length
+            const missedStatusCount = expectedStatusCount - actualStatusCount
 
-          // Check for missing check-out (only if check-in was more than work hours ago)
-          const checkoutGraceEnd = new Date(estTime)
-          checkoutGraceEnd.setHours(DEFAULT_CONFIG.workEndHour + 2, 0, 0, 0) // 2 hours grace after work end
+            // Create violation if missed more than 2 status updates
+            if (missedStatusCount > 2) {
+              if (!(await violationExists(supabase, employee.id, 'no_status_update', targetDateStr))) {
+                let severity = 'low'
+                if (missedStatusCount > 4) severity = 'medium'
+                if (missedStatusCount > 6) severity = 'high'
 
-          // For end-of-day checks, always check for missing checkout
-          // For real-time checks, only check if we're past the grace period
-          const shouldCheckCheckout = checkEndOfDay || nowEST > checkoutGraceEnd
-
-          if (shouldCheckCheckout) {
-            const { data: checkOut } = await supabase
-              .from('check_outs')
-              .select('id')
-              .eq('check_in_id', checkIn.id)
-              .maybeSingle()
-
-            if (!checkOut) {
-              const hoursOverdue = checkEndOfDay
-                ? 24 // End of day - they never checked out
-                : (nowEST.getTime() - checkoutGraceEnd.getTime()) / (1000 * 60 * 60)
-
-              let severity = 'medium'
-              if (checkEndOfDay) severity = 'high' // Missed checkout for entire day
-              else if (hoursOverdue > 2) severity = 'medium'
-              else if (hoursOverdue > 6) severity = 'high'
-
-              // Check if violation already exists
-              const { data: existingViolation } = await supabase
-                .from('violations')
-                .select('id')
-                .eq('employee_id', employee.id)
-                .eq('violation_type', 'no_checkout')
-                .eq('violation_date', targetDateStr)
-                .maybeSingle()
-
-              if (!existingViolation) {
                 violations.push({
                   employee_id: employee.id,
-                  violation_type: 'no_checkout',
+                  violation_type: 'no_status_update',
                   violation_date: targetDateStr,
                   severity,
-                  description: checkEndOfDay
-                    ? `No check-out recorded for ${targetDateStr}. Checked in at ${checkInTime.toLocaleTimeString()}`
-                    : `No check-out recorded for check-in at ${checkInTime.toLocaleTimeString()}`,
+                  description: `Missed ${missedStatusCount} hourly status updates on ${targetDateStr}. Expected: ${expectedStatusCount}, Actual: ${actualStatusCount}.`,
                 })
 
                 notifications.push({
                   employee_id: employee.id,
                   type: 'violation',
-                  title: 'Missing Check-out',
-                  message: checkEndOfDay
-                    ? `You did not check out on ${targetDateStr}. A violation has been recorded.`
-                    : `You checked in today but haven't checked out. Please check out.`,
+                  title: 'Missing Status Updates',
+                  message: `You missed ${missedStatusCount} hourly status updates on ${targetDateStr}.`,
                 })
+              }
+            }
+          }
+        }
+      }
 
-                // Auto-checkout at 6 PM EST (18:00) if not checked out and it's end of day check
-                if (checkEndOfDay) {
-                  const autoCheckoutTime = new Date(estTime)
-                  autoCheckoutTime.setHours(18, 0, 0, 0) // 6 PM EST
+      // ============================================
+      // CHECK TYPE: HOURLY STATUS (scheduled hourly)
+      // ============================================
+      if (checkType === 'hourly_status') {
+        // Only check if employee is checked in and within work hours
+        if (checkIn && nowEST >= workStart && nowEST <= workEnd) {
+          const currentHour = nowEST.getHours()
 
-                  // Calculate hours from check-in to 6 PM
-                  const totalHours = (autoCheckoutTime.getTime() - new Date(checkIn.check_in_time).getTime()) / (1000 * 60 * 60)
+          // Check if there's a status update for the previous hour
+          const previousHourStart = new Date(nowEST)
+          previousHourStart.setHours(currentHour - 1, 0, 0, 0)
+          const previousHourEnd = new Date(nowEST)
+          previousHourEnd.setHours(currentHour, 0, 0, 0)
 
-                  // Only auto-checkout if hours are reasonable (positive and less than 12)
-                  if (totalHours > 0 && totalHours < 12) {
-                    await supabase
-                      .from('check_outs')
-                      .insert({
-                        employee_id: employee.id,
-                        check_in_id: checkIn.id,
-                        check_out_time: autoCheckoutTime.toISOString(),
-                        check_out_notes: 'Auto-checkout - No manual checkout recorded',
-                        total_hours: Math.round(totalHours * 100) / 100,
-                      })
-                      .catch((err: any) => console.error('Error auto-checking out employee:', err))
-                  }
+          const { data: hourStatus } = await supabase
+            .from('hourly_status')
+            .select('id')
+            .eq('employee_id', employee.id)
+            .gte('status_time', previousHourStart.toISOString())
+            .lt('status_time', previousHourEnd.toISOString())
+            .maybeSingle()
+
+          if (!hourStatus && currentHour > startHour) {
+            // Send reminder notification (not a violation yet)
+            notifications.push({
+              employee_id: employee.id,
+              type: 'reminder',
+              title: 'Hourly Status Reminder',
+              message: `Please submit your hourly status update for ${currentHour - 1}:00 - ${currentHour}:00.`,
+            })
+          }
+        }
+      }
+
+      // ============================================
+      // CHECK TYPE: REALTIME (can be called anytime)
+      // ============================================
+      if (checkType === 'realtime') {
+        // Only process if we're past work start time
+        if (nowEST > workStart) {
+          // Check for late check-in (if checked in today)
+          if (checkIn) {
+            const checkInTime = new Date(checkIn.check_in_time)
+            const checkInEST = new Date(checkInTime.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+
+            if (checkInEST > workStart) {
+              const minutesLate = Math.floor((checkInEST.getTime() - workStart.getTime()) / (1000 * 60))
+              const severity = getLateSeverity(minutesLate)
+
+              if (severity !== 'none') {
+                if (!(await violationExists(supabase, employee.id, 'late_checkin', targetDateStr))) {
+                  violations.push({
+                    employee_id: employee.id,
+                    violation_type: 'late_checkin',
+                    violation_date: targetDateStr,
+                    severity,
+                    description: `Checked in ${minutesLate} minutes late. Work starts at ${workStartTime.slice(0, 5)}.`,
+                  })
                 }
+              }
+            }
+          } else {
+            // No check-in - check if significantly late (more than 2 hours)
+            const hoursLate = (nowEST.getTime() - workStart.getTime()) / (1000 * 60 * 60)
+
+            if (hoursLate > 2) {
+              if (!(await violationExists(supabase, employee.id, 'no_checkin', targetDateStr))) {
+                notifications.push({
+                  employee_id: employee.id,
+                  type: 'warning',
+                  title: 'Missing Check-in Warning',
+                  message: `You have not checked in today. Work started ${hoursLate.toFixed(1)} hours ago.`,
+                })
               }
             }
           }
@@ -304,7 +357,7 @@ serve(async (req) => {
     }
 
     // Insert all violations
-    let createdViolations = []
+    let createdViolations: any[] = []
     if (violations.length > 0) {
       const { data, error } = await supabase
         .from('violations')
@@ -326,7 +379,7 @@ serve(async (req) => {
         .catch((err: any) => console.error('Error creating notifications:', err))
     }
 
-    // Check for escalation
+    // Handle escalations for created violations
     const escalations: any[] = []
     for (const violation of createdViolations) {
       // Get recent violations count (last 30 days)
@@ -355,65 +408,61 @@ serve(async (req) => {
 
       if (shouldEscalate) {
         // Get employee's manager
-        const { data: empData } = await supabase
-          .from('employees')
-          .select('manager_id')
-          .eq('id', violation.employee_id)
-          .single()
-
-        if (empData?.manager_id) {
+        const emp = employees?.find((e: any) => e.id === violation.employee_id)
+        if (emp?.manager_id) {
           escalations.push({
             violation_id: violation.id,
-            escalated_to: empData.manager_id,
+            escalated_to: emp.manager_id,
+            employee_name: emp.full_name || emp.employee_id,
           })
+
+          // Update violation with escalation info
+          await supabase
+            .from('violations')
+            .update({
+              escalated: true,
+              escalated_to: emp.manager_id,
+              escalation_time: new Date().toISOString(),
+            })
+            .eq('id', violation.id)
 
           // Notify manager
           await supabase
             .from('notifications')
             .insert({
-              employee_id: empData.manager_id,
+              employee_id: emp.manager_id,
               type: 'violation_escalation',
               title: 'Violation Escalated',
-              message: `Employee ${violation.employee_id} has ${recentCount} violations in the last 30 days`,
+              message: `${emp.full_name || emp.employee_id} has ${recentCount} violations in the last 30 days. Latest: ${violation.violation_type}`,
               link: `/violations/${violation.id}`,
             })
-            .catch((err: any) => console.error('Error creating escalation notification:', err))
         }
       }
-    }
-
-    // Update violations with escalation info
-    for (const escalation of escalations) {
-      await supabase
-        .from('violations')
-        .update({
-          escalated: true,
-          escalated_to: escalation.escalated_to,
-          escalation_time: new Date().toISOString(),
-        })
-        .eq('id', escalation.violation_id)
     }
 
     return new Response(
       JSON.stringify({
         success: true,
+        check_type: checkType,
         date_checked: targetDateStr,
+        current_time_est: nowEST.toISOString(),
         summary: {
-          employees_checked: (employees?.length || 0) - skippedEmployees.length,
-          employees_on_vacation: skippedEmployees.length,
+          employees_processed: processedEmployees.length,
+          employees_skipped: skippedEmployees.length,
           violations_created: createdViolations.length,
           notifications_sent: notifications.length,
           escalations: escalations.length,
         },
-        skipped_employees_on_vacation: skippedEmployees,
+        skipped_employees: skippedEmployees,
         violations: createdViolations,
+        escalations,
       }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   } catch (error) {
     console.error('Error:', error)
     return new Response(
-      JSON.stringify({ success: false, error: error.message }),
+      JSON.stringify({ success: false, error: (error as Error).message }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }
