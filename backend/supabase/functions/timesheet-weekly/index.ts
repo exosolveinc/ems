@@ -11,30 +11,29 @@ const WORK_START_HOUR = 9  // 9 AM
 const WORK_END_HOUR = 17   // 5 PM
 const HOURS_PER_DAY = WORK_END_HOUR - WORK_START_HOUR // 8 hours
 
-// Convert any timestamp to EST using proper timezone conversion
-function toEstDate(timestamp: string): Date {
+// Convert UTC timestamp to EST date string (YYYY-MM-DD)
+// Used for check_in_time which is stored in UTC
+function getEstDateStringFromUtc(timestamp: string): string {
   const date = new Date(timestamp)
-  // Use toLocaleString to convert to EST, then parse back
   const estString = date.toLocaleString('en-US', { timeZone: 'America/New_York' })
-  return new Date(estString)
-}
-
-// Get date string in EST (YYYY-MM-DD)
-function getEstDateString(timestamp: string): string {
-  const estDate = toEstDate(timestamp)
+  const estDate = new Date(estString)
   const year = estDate.getFullYear()
   const month = String(estDate.getMonth() + 1).padStart(2, '0')
   const day = String(estDate.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
 }
 
-// Get hour in EST from a timestamp (converts from UTC)
-function getEstHour(timestamp: string): number {
-  const estDate = toEstDate(timestamp)
+// Convert UTC timestamp to EST hour
+// Used for check_in_time which is stored in UTC
+function getEstHourFromUtc(timestamp: string): number {
+  const date = new Date(timestamp)
+  const estString = date.toLocaleString('en-US', { timeZone: 'America/New_York' })
+  const estDate = new Date(estString)
   return estDate.getHours()
 }
 
 // Get date string from a timestamp already stored in EST (no conversion needed)
+// Used for hourly_status.status_time which is stored in EST
 function getDateStringFromEst(timestamp: string): string {
   const date = new Date(timestamp)
   const year = date.getFullYear()
@@ -44,6 +43,7 @@ function getDateStringFromEst(timestamp: string): string {
 }
 
 // Get hour from a timestamp already stored in EST (no conversion needed)
+// Used for hourly_status.status_time which is stored in EST
 function getHourFromEst(timestamp: string): number {
   const date = new Date(timestamp)
   return date.getHours()
@@ -279,8 +279,14 @@ serve(async (req) => {
     }
 
     // Fetch all required data for the week
-    const weekStartStr = weekStart.toISOString()
-    const weekEndStr = weekEnd.toISOString()
+    // Expand the query range to account for timezone differences (EST is UTC-5)
+    // This ensures we capture check-ins that might be on different UTC days
+    const queryStart = new Date(weekStart)
+    queryStart.setHours(queryStart.getHours() - 12) // Buffer for timezone
+    const queryEnd = new Date(weekEnd)
+    queryEnd.setHours(queryEnd.getHours() + 12) // Buffer for timezone
+    const weekStartStr = queryStart.toISOString()
+    const weekEndStr = queryEnd.toISOString()
 
     // Fetch check-ins for the week
     const { data: checkIns } = await supabaseAdmin
@@ -353,9 +359,9 @@ serve(async (req) => {
         const day = String(currentDate.getDate()).padStart(2, '0')
         const dateStr = `${year}-${month}-${day}`
 
-        // Find check-in for this day (check_in_time is stored in EST)
+        // Find check-in for this day (check_in_time is stored in UTC, convert to EST)
         const dayCheckIn = empCheckIns.find((c: any) => {
-          const checkInDate = getEstDateString(c.check_in_time)
+          const checkInDate = getEstDateStringFromUtc(c.check_in_time)
           return checkInDate === dateStr
         })
 
@@ -415,8 +421,9 @@ serve(async (req) => {
             }
           } else if (isCheckedIn) {
             // No status for this hour but checked in - mark as gap
-            const checkInHour = checkInTime ? getEstHour(checkInTime) : null
-            const checkOutHour = checkOutTime ? getEstHour(checkOutTime) : null
+            // check_in_time and check_out_time are stored in UTC, convert to EST
+            const checkInHour = checkInTime ? getEstHourFromUtc(checkInTime) : null
+            const checkOutHour = checkOutTime ? getEstHourFromUtc(checkOutTime) : null
 
             if (checkInHour !== null && hour >= checkInHour) {
               if (checkOutHour === null || hour < checkOutHour) {

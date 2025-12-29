@@ -299,8 +299,21 @@ async function handleCreate(supabase: any, userId: string, req: Request) {
       }
     }
 
-    // Use provided status_time or current time
-    const timestamp = status_time ? new Date(status_time).toISOString() : new Date().toISOString()
+    // Use provided status_time or current time, converted to EST
+    const toEST = (date: Date): string => {
+      return date.toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }).replace(/(\d+)\/(\d+)\/(\d+),\s/, '$3-$1-$2 ')
+    }
+    const inputDate = status_time ? new Date(status_time) : new Date()
+    const timestamp = toEST(inputDate)
 
     // Create status update
     const { data, error } = await supabase

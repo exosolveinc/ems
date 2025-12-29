@@ -26,13 +26,27 @@ function getEstTimestamp(): string {
   return estDate.toISOString()
 }
 
-// Get EST timestamp for hourly status (rounded to hour start)
-function getEstHourlyTimestamp(): string {
+// Get EST timestamp formatted for database storage (YYYY-MM-DD HH:MM:SS)
+function getEstTimestampForDb(): string {
+  const now = new Date()
+  return now.toLocaleString('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).replace(/(\d+)\/(\d+)\/(\d+),\s/, '$3-$1-$2 ')
+}
+
+// Get current EST hour (0-23)
+function getEstCurrentHour(): number {
   const now = new Date()
   const estString = now.toLocaleString('en-US', { timeZone: 'America/New_York' })
   const estDate = new Date(estString)
-  estDate.setMinutes(0, 0, 0)
-  return estDate.toISOString()
+  return estDate.getHours()
 }
 
 serve(async (req) => {
@@ -181,29 +195,43 @@ serve(async (req) => {
 
       if (breakError) throw breakError
 
-      // Create hourly status with 'break' work_status (EST)
-      const statusTimeEst = getEstHourlyTimestamp()
+      // Create hourly status with 'break' work_status (EST format for DB)
+      const statusTimeEst = getEstTimestampForDb()
+      const currentHour = getEstCurrentHour()
 
-      // Check if hourly status already exists for this hour
+      // Check if hourly status already exists for this hour today
+      // Query by date and hour range since exact timestamp match is unreliable
+      const hourStart = `${todayDate} ${String(currentHour).padStart(2, '0')}:00:00`
+      const hourEnd = `${todayDate} ${String(currentHour).padStart(2, '0')}:59:59`
+
       const { data: existingStatus } = await supabaseAdmin
         .from('hourly_status')
         .select('id')
         .eq('employee_id', user.id)
-        .eq('status_time', statusTimeEst)
+        .gte('status_time', hourStart)
+        .lte('status_time', hourEnd)
         .maybeSingle()
 
+      let hourlyStatusResult = null
       if (existingStatus) {
         // Update existing status to break
-        await supabaseAdmin
+        const { data: updatedStatus, error: updateError } = await supabaseAdmin
           .from('hourly_status')
           .update({
             work_status: 'break',
             status_text: notes || 'Taking a break',
           })
           .eq('id', existingStatus.id)
+          .select()
+          .single()
+
+        if (updateError) {
+          console.error('Failed to update hourly status:', updateError)
+        }
+        hourlyStatusResult = updatedStatus
       } else {
         // Create new hourly status with EST time
-        await supabaseAdmin
+        const { data: newStatus, error: insertError } = await supabaseAdmin
           .from('hourly_status')
           .insert({
             employee_id: user.id,
@@ -211,6 +239,13 @@ serve(async (req) => {
             work_status: 'break',
             status_text: notes || 'Taking a break',
           })
+          .select()
+          .single()
+
+        if (insertError) {
+          console.error('Failed to insert hourly status:', insertError)
+        }
+        hourlyStatusResult = newStatus
       }
 
       return new Response(
