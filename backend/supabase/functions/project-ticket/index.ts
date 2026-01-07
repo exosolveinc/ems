@@ -9,6 +9,35 @@ const corsHeaders = {
 
 // Valid enum values
 const TASK_TYPES = ['story', 'bug', 'task', 'epic', 'spike']
+
+// Helper function to build full_name from first_name and last_name if full_name is null
+function buildFullName(employee: any): any {
+  if (!employee) return employee
+  if (employee.full_name === null || employee.full_name === undefined) {
+    const firstName = employee.first_name || ''
+    const lastName = employee.last_name || ''
+    const constructedName = `${firstName} ${lastName}`.trim()
+    employee.full_name = constructedName || null
+  }
+  // Remove first_name and last_name from response to keep it clean
+  delete employee.first_name
+  delete employee.last_name
+  return employee
+}
+
+// Apply buildFullName to all employee fields in a task
+function processTaskEmployeeNames(task: any): any {
+  if (task.assigned_employee) {
+    task.assigned_employee = buildFullName(task.assigned_employee)
+  }
+  if (task.reviewer) {
+    task.reviewer = buildFullName(task.reviewer)
+  }
+  if (task.creator) {
+    task.creator = buildFullName(task.creator)
+  }
+  return task
+}
 const PRIORITIES = ['critical', 'high', 'medium', 'low']
 const STORY_POINTS = [1, 2, 3, 5, 8, 13, 21]
 const COMPLEXITIES = ['Low', 'Medium', 'High']
@@ -126,6 +155,8 @@ serve(async (req) => {
             assigned_employee:assigned_employee_id (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id,
               profile_image_url
@@ -133,6 +164,8 @@ serve(async (req) => {
             reviewer:reviewer_id (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id,
               profile_image_url
@@ -140,6 +173,8 @@ serve(async (req) => {
             creator:created_by (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id
             )
@@ -179,9 +214,12 @@ serve(async (req) => {
 
         if (error) throw error
 
-        // Generate signed URLs for file attachments
+        // Generate signed URLs for file attachments and process employee names
         const tasksWithSignedUrls = await Promise.all(
           (data || []).map(async (task: any) => {
+            // Process employee names to build full_name from first_name/last_name if needed
+            processTaskEmployeeNames(task)
+
             if (task.file_urls && task.file_urls.length > 0) {
               const fileAttachments = await Promise.all(
                 task.file_urls.map(async (filePath: string) => {
@@ -678,6 +716,8 @@ serve(async (req) => {
             assigned_employee:assigned_employee_id (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id,
               profile_image_url
@@ -685,6 +725,8 @@ serve(async (req) => {
             reviewer:reviewer_id (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id,
               profile_image_url
@@ -692,6 +734,8 @@ serve(async (req) => {
             creator:created_by (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id
             )
@@ -699,6 +743,9 @@ serve(async (req) => {
           .single()
 
         if (taskError) throw taskError
+
+        // Process employee names
+        processTaskEmployeeNames(task)
 
         return new Response(
           JSON.stringify({
@@ -972,6 +1019,8 @@ serve(async (req) => {
             assigned_employee:assigned_employee_id (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id,
               profile_image_url
@@ -979,6 +1028,8 @@ serve(async (req) => {
             reviewer:reviewer_id (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id,
               profile_image_url
@@ -986,6 +1037,8 @@ serve(async (req) => {
             creator:created_by (
               id,
               full_name,
+              first_name,
+              last_name,
               email,
               employee_id
             )
@@ -993,6 +1046,9 @@ serve(async (req) => {
           .single()
 
         if (updateError) throw updateError
+
+        // Process employee names
+        processTaskEmployeeNames(task)
 
         return new Response(
           JSON.stringify({
