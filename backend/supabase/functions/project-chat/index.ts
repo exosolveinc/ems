@@ -1,13 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import {
-  toYAML,
-  daysAgo,
-  getCurrentDate,
-  TIME_RANGES,
-  callHaiku,
-  SYSTEM_PROMPTS
-} from '../_shared/chat-utils.ts'
+import { handleChatWithSQL } from '../_shared/sql-utils.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -15,13 +8,11 @@ const corsHeaders = {
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
 
   try {
-    // Only allow POST
     if (req.method !== 'POST') {
       return new Response(
         JSON.stringify({ success: false, error: 'Method not allowed' }),
@@ -29,7 +20,6 @@ serve(async (req) => {
       )
     }
 
-    // Get auth header
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) {
       return new Response(
@@ -38,7 +28,6 @@ serve(async (req) => {
       )
     }
 
-    // Create Supabase clients
     const supabaseAuth = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_ANON_KEY') ?? '',
@@ -50,7 +39,6 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    // Verify authentication
     const { data: { user }, error: authError } = await supabaseAuth.auth.getUser()
     if (authError || !user) {
       return new Response(
@@ -59,7 +47,6 @@ serve(async (req) => {
       )
     }
 
-    // Get user role
     const { data: employee } = await supabaseAdmin
       .from('employees')
       .select('role, first_name, last_name')
@@ -69,7 +56,6 @@ serve(async (req) => {
     const userRole = employee?.role || 'employee'
     const userName = employee ? `${employee.first_name} ${employee.last_name}` : 'User'
 
-    // Parse request body
     const body = await req.json()
     const { message } = body
 
@@ -80,66 +66,25 @@ serve(async (req) => {
       )
     }
 
-    // Fetch data - all users can see all projects/tasks
-    const since = daysAgo(TIME_RANGES.project)
-
-    // Include employee list for name matching (all users can query by name)
-    const { data: employees } = await supabaseAdmin
-      .from('employees')
-      .select('id, first_name, last_name, email')
-
-    // Fetch active projects
-    const { data: projects, error: projectError } = await supabaseAdmin
-      .from('projects')
-      .select('*')
-      .in('status', ['active'])
-
-    if (projectError) throw projectError
-
-    // Build tasks query - all active + recently completed (no employee filter)
-    const { data: tasks, error: taskError } = await supabaseAdmin
-      .from('tasks')
-      .select(`
-        *,
-        project:projects!project_id(project_name),
-        assignee:employees!assigned_employee_id(first_name, last_name),
-        reviewer:employees!reviewer_id(first_name, last_name)
-      `)
-      .or(`status.neq.Done,updated_at.gte.${since}`)
-      .order('updated_at', { ascending: false })
-
-    if (taskError) throw taskError
-
-    // Build data object - all users get full data
-    const dataForAI = { employees, projects, tasks }
-
-    // Convert to YAML
-    const yamlData = toYAML(dataForAI)
-
-    // Build context
-    const currentDate = getCurrentDate()
-    const systemPrompt = SYSTEM_PROMPTS.project(userRole, currentDate)
-    const userMessage = `Your role: ${userRole}
-Your name: ${userName}
-Today: ${currentDate}
-
-Data:
-${yamlData}
-
-Question: ${message}`
-
-    // Call Haiku
-    const response = await callHaiku(systemPrompt, userMessage)
+    // Use text-to-SQL approach
+    const result = await handleChatWithSQL(
+      'project-chat',
+      message,
+      userRole,
+      user.id,
+      userName,
+      supabaseAdmin
+    )
 
     return new Response(
-      JSON.stringify({ success: true, response }),
-      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      JSON.stringify(result),
+      { status: result.success ? 200 : 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
   } catch (error) {
     console.error('Error:', error)
     return new Response(
-      JSON.stringify({ success: false, error: error.message }),
+      JSON.stringify({ success: false, error: 'Something went wrong. Please try again.' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }

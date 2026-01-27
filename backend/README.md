@@ -33,6 +33,7 @@
    ```bash
    npm run deploy:all
    ```
+   ### Select 1 hygwacgmveeipjrybqip for ems
 
 ## 📁 Structure
 
