@@ -295,7 +295,6 @@ serve(async (req) => {
         id,
         employee_id,
         check_in_time,
-        work_location,
         task_ids,
         check_outs (
           id,

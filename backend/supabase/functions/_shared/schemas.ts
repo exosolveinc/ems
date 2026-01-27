@@ -206,6 +206,34 @@ EXAMPLE QUERIES:
   JOIN employees e ON co.employee_id = e.id
   WHERE co.check_out_time >= '2024-01-01' AND co.check_out_time < '2025-01-01'
   GROUP BY e.id, e.full_name
+
+- Hours logged PREVIOUS WEEK (from check_outs):
+  SELECT e.full_name, SUM(co.total_hours) as total_hours, COUNT(*) as days_worked
+  FROM check_outs co
+  JOIN employees e ON co.employee_id = e.id
+  WHERE co.check_out_time >= DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days'
+    AND co.check_out_time < DATE_TRUNC('week', CURRENT_DATE)
+  GROUP BY e.id, e.full_name
+
+- Hours logged THIS WEEK (from check_outs):
+  SELECT e.full_name, SUM(co.total_hours) as total_hours
+  FROM check_outs co
+  JOIN employees e ON co.employee_id = e.id
+  WHERE co.check_out_time >= DATE_TRUNC('week', CURRENT_DATE)
+  GROUP BY e.id, e.full_name
+
+- Weekly timesheet summary for previous week:
+  SELECT e.full_name, ts.week_start_date, ts.week_end_date, ts.total_hours, ts.status
+  FROM timesheets ts
+  JOIN employees e ON ts.employee_id = e.id
+  WHERE ts.week_start_date = DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days'
+
+IMPORTANT FOR HOURS QUERIES:
+- Hours are stored in check_outs.total_hours (calculated from check-in to check-out)
+- timesheets.total_hours contains weekly summaries
+- hourly_status tracks WHAT was worked on, not hours (count entries for activity)
+- "hours logged" = query check_outs.total_hours or timesheets.total_hours
+- "previous week" = DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days' to DATE_TRUNC('week', CURRENT_DATE)
 `,
     employeeFilteredTables: ['check_ins', 'check_outs', 'hourly_status', 'timesheets']
   },
@@ -383,6 +411,17 @@ EXAMPLE QUERIES:
   JOIN employees e ON t.assigned_employee_id = e.id
   JOIN projects p ON t.project_id = p.id
   WHERE t.status IN ('In Progress', 'In Review')
+
+- Compare two employees (CORRECT way - use conditional aggregation):
+  SELECT
+    e.full_name,
+    COUNT(t.id) as task_count,
+    SUM(t.story_points) as total_points,
+    COUNT(CASE WHEN t.status = 'Done' THEN 1 END) as completed
+  FROM employees e
+  LEFT JOIN tasks t ON t.assigned_employee_id = e.id
+  WHERE e.full_name ILIKE '%john%' OR e.full_name ILIKE '%sushant%'
+  GROUP BY e.id, e.full_name
 `,
     employeeFilteredTables: []  // No filter - all users can see all projects/tasks
   },
