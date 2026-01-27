@@ -141,19 +141,74 @@ TEXT SEARCH - ALWAYS USE FUZZY MATCHING:
 - NEVER use exact match (=) for text searches unless user provides exact value in quotes
 - ILIKE is case-insensitive, so 'ems', 'EMS', 'Ems' all match
 
-IMPORTANT - DATE HANDLING:
-- NO date restrictions - users can query ANY date range including previous years
-- If user asks about "last year", "2023", "previous quarter", etc., generate appropriate date filters
-- Use EXTRACT(YEAR FROM column) for year-based queries
-- Examples: "last year" = previous calendar year, "Q1 2024" = '2024-01-01' to '2024-03-31'
+CRITICAL - DATE HANDLING (ANALYZE CAREFULLY):
+You MUST carefully analyze the user's question to determine the EXACT date range they are asking about.
 
-PostgreSQL DATE SYNTAX (must be exact):
-- INTERVAL must have quotes: INTERVAL '1 week' NOT INTERVAL 1 week
+STEP 1 - IDENTIFY DATE INTENT:
+- Does the question mention a specific time period? (today, this week, last month, Q1, 2024, etc.)
+- Is the question about "current" or "recent" data? (implies current period)
+- Is the question about "history" or "trends"? (may need wider range)
+- Is there NO time reference? (default to relevant current period based on context)
+
+STEP 2 - MAP TO EXACT DATES:
+Today: ${today}
+Current Year: ${now.getFullYear()}
+Previous Year: ${now.getFullYear() - 1}
+
+RELATIVE TIME MAPPINGS (be precise):
+- "today" = WHERE date_column = '${today}'
+- "yesterday" = WHERE date_column = CURRENT_DATE - INTERVAL '1 day'
+- "this week" = WHERE date_column >= '${weekStart}' AND date_column <= '${weekEnd}'
+- "last week" / "previous week" = the 7 days BEFORE this week started
+- "this month" = WHERE date_column >= '${monthStart}' AND date_column < DATE_TRUNC('month', CURRENT_DATE + INTERVAL '1 month')
+- "last month" / "previous month" = the full calendar month before current month
+- "this quarter" = current Q1/Q2/Q3/Q4 based on current month
+- "last quarter" = the quarter immediately before current quarter
+- "this year" / "YTD" = WHERE EXTRACT(YEAR FROM date_column) = ${now.getFullYear()}
+- "last year" / "previous year" = WHERE EXTRACT(YEAR FROM date_column) = ${now.getFullYear() - 1}
+
+SPECIFIC YEAR REFERENCES:
+- "in 2024" or "2024" = WHERE EXTRACT(YEAR FROM date_column) = 2024
+- "in 2023" or "2023" = WHERE EXTRACT(YEAR FROM date_column) = 2023
+- "since 2023" = WHERE date_column >= '2023-01-01'
+- "before 2024" = WHERE date_column < '2024-01-01'
+- "between 2023 and 2024" = WHERE EXTRACT(YEAR FROM date_column) BETWEEN 2023 AND 2024
+
+QUARTER MAPPINGS:
+- Q1 = January 1 to March 31 ('YYYY-01-01' to 'YYYY-03-31')
+- Q2 = April 1 to June 30 ('YYYY-04-01' to 'YYYY-06-30')
+- Q3 = July 1 to September 30 ('YYYY-07-01' to 'YYYY-09-30')
+- Q4 = October 1 to December 31 ('YYYY-10-01' to 'YYYY-12-31')
+- "Q1 2024" = WHERE date_column >= '2024-01-01' AND date_column <= '2024-03-31'
+
+MONTH MAPPINGS (when user says "January", "Feb", etc.):
+- Use current year if month is in past/current, use previous year if month is in future
+- "January" = '${now.getFullYear()}-01-01' to '${now.getFullYear()}-01-31'
+- "last January" = explicitly previous year's January
+
+RANGE EXPRESSIONS:
+- "last N days" = WHERE date_column >= CURRENT_DATE - INTERVAL 'N days'
+- "last N weeks" = WHERE date_column >= CURRENT_DATE - INTERVAL 'N weeks'
+- "last N months" = WHERE date_column >= CURRENT_DATE - INTERVAL 'N months'
+- "past N days/weeks/months" = same as "last N"
+- "recent" = typically last 7-30 days depending on context
+
+PostgreSQL DATE SYNTAX (must be exact - SYNTAX ERRORS ARE UNACCEPTABLE):
+- INTERVAL must ALWAYS have quotes: INTERVAL '1 week' NOT INTERVAL 1 week
 - Date arithmetic: CURRENT_DATE - INTERVAL '7 days' or NOW() - INTERVAL '1 week'
 - Previous week: WHERE date_column >= CURRENT_DATE - INTERVAL '14 days' AND date_column < CURRENT_DATE - INTERVAL '7 days'
 - Last 7 days: WHERE date_column >= CURRENT_DATE - INTERVAL '7 days'
 - Previous month: WHERE date_column >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') AND date_column < DATE_TRUNC('month', CURRENT_DATE)
 - DATE_TRUNC for period starts: DATE_TRUNC('week', CURRENT_DATE), DATE_TRUNC('month', CURRENT_DATE)
+- EXTRACT for components: EXTRACT(YEAR FROM date_column), EXTRACT(MONTH FROM date_column)
+- For date ranges, ALWAYS use >= for start and <= or < for end (be consistent)
+
+DEFAULT BEHAVIOR (when NO date is mentioned):
+- For tasks/work queries: include all non-completed items (no date filter needed)
+- For timesheet/attendance: default to current week or month
+- For reports/metrics: default to current month
+- For "all" or "total": no date restriction
+- When in doubt about date range, include data and let the answer clarify the time period
 
 INTERPRETING VAGUE QUESTIONS:
 - "overworked" or "busiest" = most tasks assigned (COUNT tasks) or most story points (SUM story_points)
@@ -174,11 +229,15 @@ IMPORTANT - QUESTION INTERPRETATION:
 SCHEMA:
 ${schema.schema}
 
-DATE CONTEXT (for reference, not restrictions):
+DATE CONTEXT (use these exact values):
 - Today: ${today}
-- This week: ${weekStart} to ${weekEnd} (Monday to Sunday)
-- This month starts: ${monthStart}
+- Yesterday: ${new Date(now.getTime() - 86400000).toISOString().split('T')[0]}
+- This week: ${weekStart} (Monday) to ${weekEnd} (Sunday)
+- This month: ${monthStart} to end of month
+- Current year: ${now.getFullYear()}
 - Previous year: ${now.getFullYear() - 1}
+- Current quarter: Q${Math.ceil((now.getMonth() + 1) / 3)} ${now.getFullYear()}
+- Day of week: ${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][now.getDay()]}
 
 USER CONTEXT:
 - User ID: ${userId}
