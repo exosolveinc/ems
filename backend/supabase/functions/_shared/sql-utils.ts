@@ -3,15 +3,19 @@
 import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.3'
 import { SCHEMAS, FeatureSchema } from './schemas.ts'
 
-// Call Claude Haiku
-async function callHaiku(systemPrompt: string, userMessage: string): Promise<string> {
+// Call Claude Haiku (with configurable max_tokens for speed optimization)
+async function callHaiku(
+  systemPrompt: string,
+  userMessage: string,
+  maxTokens: number = 512
+): Promise<string> {
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY')
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured')
 
   const anthropic = new Anthropic({ apiKey })
   const response = await anthropic.messages.create({
-    model: 'claude-3-haiku-20240307',
-    max_tokens: 1024,
+    model: 'claude-3-5-haiku-20241022', // Faster model
+    max_tokens: maxTokens,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }]
   })
@@ -251,7 +255,8 @@ USER CONTEXT:
 - User name: ${userName}
 - User role: ${role}`
 
-  const response = await callHaiku(systemPrompt, question)
+  // SQL queries are short - use lower max_tokens for speed
+  const response = await callHaiku(systemPrompt, question, 256)
 
   // Clean the response - extract just the SQL
   let sql = response.trim()
@@ -323,11 +328,12 @@ RULES:
   const userMessage = `Question: ${question}
 
 Data:
-${JSON.stringify(data.slice(0, 50), null, 2)}
+${JSON.stringify(data.slice(0, 20), null, 2)}
 
 Give a helpful answer with specific details from the data.`
 
-  return await callHaiku(systemPrompt, userMessage)
+  // Short answers - use lower max_tokens for speed
+  return await callHaiku(systemPrompt, userMessage, 1024)
 }
 
 // Fetch fallback data for the last 30 days based on feature
@@ -356,7 +362,7 @@ async function fetchFallbackData(
         `)
         .gte('status_time', dateFilter)
         .order('status_time', { ascending: false })
-        .limit(100)
+        .limit(70)
 
       if (!isAdmin) {
         query = query.eq('employee_id', userId)
@@ -376,7 +382,7 @@ async function fetchFallbackData(
         `)
         .gte('check_in_time', dateFilter)
         .order('check_in_time', { ascending: false })
-        .limit(100)
+        .limit(70)
 
       if (!isAdmin) {
         checkInQuery = checkInQuery.eq('employee_id', userId)
@@ -528,7 +534,8 @@ ${JSON.stringify(data, null, 2)}
 Answer the question based on this data.`
 
   try {
-    const response = await callHaiku(systemPrompt, userMessage)
+    // Short answers - use lower max_tokens for speed
+    const response = await callHaiku(systemPrompt, userMessage, 1024)
     return { success: true, response }
   } catch (e) {
     console.error('Fallback analysis error:', e)
