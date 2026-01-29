@@ -112,7 +112,27 @@ CRITICAL RULES - READ CAREFULLY:
 1. You can ONLY generate SELECT statements. NEVER use CREATE, INSERT, UPDATE, DELETE, DROP, ALTER, or any other statement.
 2. "next task" or "what task should I work on" = SELECT existing tasks assigned to user, NOT create new task
 3. "my tasks" = SELECT tasks WHERE assigned_employee_id = user's ID
-4. This is a READ-ONLY system - users are asking about EXISTING data, never asking to create/modify data
+4. This is a READ-ONLY system - all queries must be SELECT statements
+
+SPECIAL CASE - "CREATE TASK" REQUESTS:
+When user asks to "create a task", "add a task", "make a task", or similar:
+- DO NOT generate CREATE/INSERT statements
+- Instead, SELECT data to help suggest a task outline:
+  - Query similar tasks in the project to see title patterns, assignees, priorities
+  - Query employees who work on that project/technology
+  - Query project details
+- The analysis step will format this as a suggested task outline
+
+Example: "create a task for login bug in EMS project" should generate:
+SELECT t.title, t.description, t.task_type, t.priority, t.story_points,
+       p.project_name, p.id as project_id,
+       e.full_name as typical_assignee, e.id as assignee_id
+FROM tasks t
+JOIN projects p ON t.project_id = p.id
+LEFT JOIN employees e ON t.assigned_employee_id = e.id
+WHERE p.project_name ILIKE '%ems%' AND t.task_type = 'bug'
+ORDER BY t.created_at DESC
+LIMIT 5
 
 Example: "what task should I work on next?" should generate:
 SELECT t.ticket_number, t.title, t.priority, t.status, p.project_name
@@ -300,6 +320,13 @@ export async function executeSQL(
   }
 }
 
+// Check if question is about creating a task
+function isCreateTaskQuestion(question: string): boolean {
+  const q = question.toLowerCase()
+  return (q.includes('create') || q.includes('add') || q.includes('make') || q.includes('new')) &&
+         (q.includes('task') || q.includes('ticket') || q.includes('bug') || q.includes('story'))
+}
+
 // Analyze results and generate natural language answer
 export async function analyzeResults(
   question: string,
@@ -314,7 +341,26 @@ export async function analyzeResults(
     return 'No data found for your query.'
   }
 
-  const systemPrompt = `You answer questions based on data provided.
+  // Special handling for "create task" type questions
+  const isCreateTask = isCreateTaskQuestion(question)
+
+  const systemPrompt = isCreateTask
+    ? `You help users plan new tasks. Based on similar tasks in the project, suggest a task outline.
+
+RULES:
+- Format response as a TASK OUTLINE with these fields:
+  • Title: (suggest based on user's request and similar task patterns)
+  • Type: (bug/story/task/spike - infer from question)
+  • Description: (brief description based on what user wants) [required field and important: be specific, concise, clear]
+  • Priority: (suggest based on similar tasks, default to medium)
+  • Suggested Assignee: (based on who works on similar tasks in the project)
+  • Story Points: (suggest based on similar tasks)
+  • Project: (from the data)
+- Make the title specific and actionable
+- Keep description concise but clear
+- This is just a SUGGESTION - user will create the actual task manually
+- Don't say "I suggest" or "I recommend" - just provide the outline`
+    : `You answer questions based on data provided.
 
 RULES:
 - Give helpful, complete answers (2-4 sentences)
@@ -325,15 +371,22 @@ RULES:
 - If showing counts, give context (e.g., "React is used in 12 tasks, followed by Node.js with 8")
 - Be conversational but informative`
 
-  const userMessage = `Question: ${question}
+  const userMessage = isCreateTask
+    ? `User request: ${question}
+
+Similar tasks and project data for reference:
+${JSON.stringify(data.slice(0, 10), null, 2)}
+
+Generate a task outline based on the user's request and the similar tasks shown above.`
+    : `Question: ${question}
 
 Data:
 ${JSON.stringify(data.slice(0, 20), null, 2)}
 
 Give a helpful answer with specific details from the data.`
 
-  // Short answers - use lower max_tokens for speed
-  return await callHaiku(systemPrompt, userMessage, 1024)
+  // Use appropriate max_tokens - more for task outlines
+  return await callHaiku(systemPrompt, userMessage, isCreateTask ? 512 : 384)
 }
 
 // Fetch fallback data for the last 30 days based on feature
