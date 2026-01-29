@@ -171,6 +171,13 @@ IMPORTANT - QUESTION INTERPRETATION:
 - NEVER generate CREATE, INSERT, UPDATE - only SELECT queries
 - These are READ-ONLY queries about existing data, not requests to create anything
 
+IMPORTANT - FOR NON-ADMIN USERS (when role is 'employee' or 'hr'):
+- Questions about "types", "common", "statistics" should STILL be filtered to user's own data
+- "common violation types" = SELECT violation_type, COUNT(*) FROM violations WHERE employee_id = '[user_id]' GROUP BY violation_type
+- "my violations" = SELECT * FROM violations WHERE employee_id = '[user_id]'
+- For aggregate queries on filtered tables, ALWAYS include employee_id = '[user_id]' filter
+- If user asks general questions like "what violation types exist?", return their own data grouped by type
+
 SCHEMA:
 ${schema.schema}
 
@@ -264,6 +271,212 @@ Give a helpful answer with specific details from the data.`
   return await callHaiku(systemPrompt, userMessage)
 }
 
+// Fetch fallback data for the last 30 days based on feature
+async function fetchFallbackData(
+  feature: string,
+  role: string,
+  userId: string,
+  supabase: any
+): Promise<any> {
+  const thirtyDaysAgo = new Date()
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+  const dateFilter = thirtyDaysAgo.toISOString()
+
+  const isAdmin = role === 'admin' || role === 'manager'
+  const data: any = {}
+
+  try {
+    if (feature === 'hourly-chat') {
+      // Fetch hourly status with task details
+      let query = supabase
+        .from('hourly_status')
+        .select(`
+          id, status_time, status_text, work_status, blocker_description,
+          employee:employee_id (id, full_name, department),
+          task:task_id (id, title, ticket_number, status)
+        `)
+        .gte('status_time', dateFilter)
+        .order('status_time', { ascending: false })
+        .limit(100)
+
+      if (!isAdmin) {
+        query = query.eq('employee_id', userId)
+      }
+
+      const { data: hourlyStatus } = await query
+      data.hourly_status = hourlyStatus || []
+
+    } else if (feature === 'timesheet-chat') {
+      // Fetch check-ins with check-outs
+      let checkInQuery = supabase
+        .from('check_ins')
+        .select(`
+          id, check_in_time, task_ids,
+          employee:employee_id (id, full_name, department),
+          check_outs (id, check_out_time, total_hours)
+        `)
+        .gte('check_in_time', dateFilter)
+        .order('check_in_time', { ascending: false })
+        .limit(100)
+
+      if (!isAdmin) {
+        checkInQuery = checkInQuery.eq('employee_id', userId)
+      }
+
+      const { data: checkIns } = await checkInQuery
+      data.check_ins = checkIns || []
+
+      // Fetch timesheets
+      let timesheetQuery = supabase
+        .from('timesheets')
+        .select(`
+          id, week_start_date, week_end_date, total_hours, status, notes,
+          employee:employee_id (id, full_name, department)
+        `)
+        .gte('week_start_date', thirtyDaysAgo.toISOString().split('T')[0])
+        .order('week_start_date', { ascending: false })
+        .limit(20)
+
+      if (!isAdmin) {
+        timesheetQuery = timesheetQuery.eq('employee_id', userId)
+      }
+
+      const { data: timesheets } = await timesheetQuery
+      data.timesheets = timesheets || []
+
+    } else if (feature === 'vacation-chat') {
+      let query = supabase
+        .from('vacation_requests')
+        .select(`
+          id, start_date, end_date, total_days, vacation_type, reason, status, rejection_reason,
+          employee:employee_id (id, full_name, department),
+          approver:approved_by (id, full_name)
+        `)
+        .gte('created_at', dateFilter)
+        .order('created_at', { ascending: false })
+        .limit(50)
+
+      if (!isAdmin) {
+        query = query.eq('employee_id', userId)
+      }
+
+      const { data: vacations } = await query
+      data.vacation_requests = vacations || []
+
+    } else if (feature === 'project-chat') {
+      // Projects - all users can see
+      const { data: projects } = await supabase
+        .from('projects')
+        .select(`
+          id, project_name, description, status,
+          creator:created_by (id, full_name)
+        `)
+        .order('created_at', { ascending: false })
+        .limit(20)
+
+      data.projects = projects || []
+
+      // Tasks - all users can see
+      const { data: tasks } = await supabase
+        .from('tasks')
+        .select(`
+          id, task_type, title, ticket_number, priority, story_points, complexity, status, technology_stack,
+          project:project_id (id, project_name),
+          assignee:assigned_employee_id (id, full_name),
+          reviewer:reviewer_id (id, full_name)
+        `)
+        .order('created_at', { ascending: false })
+        .limit(100)
+
+      data.tasks = tasks || []
+
+    } else if (feature === 'violations-chat') {
+      let query = supabase
+        .from('violations')
+        .select(`
+          id, violation_type, violation_date, severity, description, resolved, escalated,
+          employee:employee_id (id, full_name, department)
+        `)
+        .gte('violation_date', thirtyDaysAgo.toISOString().split('T')[0])
+        .order('violation_date', { ascending: false })
+        .limit(50)
+
+      if (!isAdmin) {
+        query = query.eq('employee_id', userId)
+      }
+
+      const { data: violations } = await query
+      data.violations = violations || []
+    }
+
+    return data
+  } catch (e) {
+    console.error('Fallback data fetch error:', e)
+    return null
+  }
+}
+
+// Analyze data using fallback method (direct data analysis)
+async function analyzeWithFallback(
+  feature: string,
+  question: string,
+  role: string,
+  userId: string,
+  userName: string,
+  supabase: any
+): Promise<{ success: boolean; response: string }> {
+  console.log('Using fallback data analysis method')
+
+  const data = await fetchFallbackData(feature, role, userId, supabase)
+
+  if (!data || Object.values(data).every((arr: any) => !arr || arr.length === 0)) {
+    return { success: true, response: 'No data found for the last 30 days.' }
+  }
+
+  const systemPrompt = `You are a helpful assistant analyzing employee/project data.
+
+CRITICAL - USER IDENTITY:
+- The current user asking the question is: ${userName}
+- When user says "I", "my", "me" - they mean ${userName}
+- When data shows employee name "${userName}" or contains "${userName}" - that IS the current user's data
+- Treat any data with the user's name as THEIR personal data
+
+RULES:
+- Answer the user's question based on the data provided
+- Give helpful, complete answers (2-4 sentences)
+- Include specific numbers, names, and dates from the data
+- Don't describe your process or how you analyzed
+- Don't say "based on the data" or "according to the data"
+- Be conversational but informative - speak directly to the user about THEIR data
+- If the question can't be answered from the data, say so politely
+- NEVER say "I don't have information about you" if the data contains records for ${userName}
+
+USER CONTEXT:
+- User name: ${userName} (THIS IS THE PERSON ASKING)
+- User role: ${role}
+- User ID: ${userId}
+
+DATA CONTEXT:
+- This is the last 30 days of data
+- For non-admin users, data is filtered to their own records only
+- Data with employee.full_name = "${userName}" belongs to the current user`
+
+  const userMessage = `Question: ${question}
+
+Available Data:
+${JSON.stringify(data, null, 2)}
+
+Answer the question based on this data.`
+
+  try {
+    const response = await callHaiku(systemPrompt, userMessage)
+    return { success: true, response }
+  } catch (e) {
+    console.error('Fallback analysis error:', e)
+    return { success: false, response: 'Unable to analyze data. Please try again.' }
+  }
+}
+
 // Main function to handle chat request
 export async function handleChatWithSQL(
   feature: string,
@@ -272,7 +485,7 @@ export async function handleChatWithSQL(
   userId: string,
   userName: string,
   supabase: any
-): Promise<{ success: boolean; response: string; sql?: string }> {
+): Promise<{ success: boolean; response: string; sql?: string; usedFallback?: boolean }> {
   try {
     const schema = SCHEMAS[feature]
     if (!schema) {
@@ -280,25 +493,48 @@ export async function handleChatWithSQL(
     }
 
     // Step 1: Generate SQL
-    const sql = await generateSQL(feature, question, role, userId, userName)
-    console.log('Generated SQL:', sql)
+    let sql: string
+    try {
+      sql = await generateSQL(feature, question, role, userId, userName)
+      console.log('Generated SQL:', sql)
+    } catch (e) {
+      console.error('SQL generation failed, using fallback:', e)
+      const fallbackResult = await analyzeWithFallback(feature, question, role, userId, userName, supabase)
+      return { ...fallbackResult, usedFallback: true }
+    }
 
     // Step 2: Validate SQL
     const validation = validateSQL(sql, role, userId, schema.employeeFilteredTables)
     if (!validation.valid) {
-      return { success: false, response: validation.error || 'Invalid query generated.' }
+      console.log('SQL validation failed, using fallback:', validation.error)
+      const fallbackResult = await analyzeWithFallback(feature, question, role, userId, userName, supabase)
+      return { ...fallbackResult, usedFallback: true }
     }
 
     // Step 3: Execute SQL
     const { data, error } = await executeSQL(supabase, sql)
     console.log('Query result:', data?.length, 'rows')
 
+    // If SQL execution failed, try fallback
+    if (error) {
+      console.log('SQL execution failed, using fallback:', error)
+      const fallbackResult = await analyzeWithFallback(feature, question, role, userId, userName, supabase)
+      return { ...fallbackResult, usedFallback: true }
+    }
+
     // Step 4: Analyze results
     const response = await analyzeResults(question, data, error)
 
     return { success: true, response, sql }
   } catch (e) {
-    console.error('Chat error:', e)
-    return { success: false, response: 'Something went wrong. Please try again.' }
+    console.error('Chat error, trying fallback:', e)
+    // Last resort fallback
+    try {
+      const fallbackResult = await analyzeWithFallback(feature, question, role, userId, userName, supabase)
+      return { ...fallbackResult, usedFallback: true }
+    } catch (fallbackError) {
+      console.error('Fallback also failed:', fallbackError)
+      return { success: false, response: 'Something went wrong. Please try again.' }
+    }
   }
 }

@@ -392,53 +392,7 @@ serve(async (req) => {
       `)
       .in('id', task_ids)
 
-    // Check if late and create violation (using EST)
-    const checkInTimeUTC = new Date(checkin.check_in_time)
-    const checkInTime = new Date(checkInTimeUTC.toLocaleString('en-US', { timeZone: 'America/New_York' }))
-
-    // Get day of week in EST (lowercase)
-    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
-    const todayDayName = dayNames[checkInTime.getDay()]
-
-    // Get employee's work schedule (with defaults)
-    const workDays: string[] = employee.work_days || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']
-    const workStartTime: string = employee.work_start_time || '09:00:00'
-
-    // Parse work start time (HH:MM:SS format)
-    const [startHour, startMinute] = workStartTime.split(':').map(Number)
-
-    let violation = null
-
-    // Only check for late violation if today is a work day
-    if (workDays.includes(todayDayName)) {
-      const workStart = new Date(checkInTime)
-      workStart.setHours(startHour, startMinute, 0, 0)
-
-      if (checkInTime > workStart) {
-        const minutesLate = Math.floor((checkInTime.getTime() - workStart.getTime()) / (1000 * 60))
-
-        let severity = 'low'
-        if (minutesLate > 60) severity = 'high'
-        else if (minutesLate > 30) severity = 'medium'
-
-        await supabaseAdmin
-          .from('violations')
-          .insert({
-            employee_id,
-            violation_type: 'late_checkin',
-            violation_date: new Date().toISOString().split('T')[0],
-            severity,
-            description: `Checked in ${minutesLate} minutes late (work starts at ${workStartTime.slice(0, 5)})`,
-          })
-
-        violation = {
-          created: true,
-          severity,
-          minutes_late: minutesLate,
-          work_start_time: workStartTime.slice(0, 5),
-        }
-      }
-    }
+    // Note: Violations (late_checkin, no_checkin, etc.) are now auto-created via pg_cron
 
     return new Response(
       JSON.stringify({
@@ -452,7 +406,6 @@ serve(async (req) => {
           name: employee.full_name,
           employee_id: employee.employee_id,
         },
-        violation,
       }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
