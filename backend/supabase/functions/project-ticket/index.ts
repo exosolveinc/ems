@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+import Anthropic from 'https://esm.sh/@anthropic-ai/sdk@0.24.3';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -41,8 +42,106 @@ function processTaskEmployeeNames(task: any): any {
 const PRIORITIES = ['critical', 'high', 'medium', 'low']
 const STORY_POINTS = [1, 2, 3, 5, 8, 13, 21]
 const COMPLEXITIES = ['Low', 'Medium', 'High']
-const TASK_STATUSES = ['Ready', 'In Progress', 'In Review', 'Done']
+const TASK_STATUSES = ['Backlog', 'Ready', 'In Progress', 'In Review', 'Done']
 const PROJECT_STATUSES = ['active', 'inactive', 'archived']
+
+// AI auto-fill for task fields based on title, description, and project context
+async function aiAutoFillTaskFields(
+  title: string,
+  description: string | null,
+  projectTechStack: string[]
+): Promise<{
+  description?: string
+  task_type?: string
+  priority?: string
+  story_points?: number
+  complexity?: string
+  time_estimation_days?: number
+  time_estimation_hours?: number
+  time_estimation_minutes?: number
+  technology_stack?: string[]
+}> {
+  const apiKey = Deno.env.get('ANTHROPIC_API_KEY')
+  if (!apiKey) return {}
+
+  try {
+    const anthropic = new Anthropic({ apiKey })
+
+    const needsDescription = !description || description.trim() === ''
+    const hasProjectTech = projectTechStack.length > 0
+
+    const prompt = `Based on this task title${needsDescription ? '' : ' and description'}, suggest appropriate values for the task fields.
+
+Title: ${title}${needsDescription ? '' : `\nDescription: ${description}`}
+${hasProjectTech ? `\nProject's existing technology tags: ${projectTechStack.join(', ')}` : ''}
+
+Respond ONLY with a valid JSON object (no markdown, no explanation) with these fields:
+${needsDescription ? '- description: a clear, concise description of what needs to be done (1-2 sentences)\n' : ''}- task_type: one of "story", "bug", "task", "epic", "spike"
+- priority: one of "critical", "high", "medium", "low"
+- story_points: one of 1, 2, 3, 5, 8, 13, 21 (fibonacci based on effort)
+- complexity: one of "Low", "Medium", "High"
+- time_estimation_days: integer >= 0
+- time_estimation_hours: integer 0-23
+- time_estimation_minutes: integer 0-59
+- technology_stack: array of technology tags relevant to this task (e.g. ["React", "TypeScript", "PostgreSQL"])
+
+Guidelines:
+- "bug" for fixes, errors, issues
+- "story" for user-facing features
+- "task" for internal work, setup, maintenance
+- "epic" for large features spanning multiple tasks
+- "spike" for research, investigation, POC
+- Time estimation should be realistic based on complexity
+- For technology_stack: ${hasProjectTech ? 'prefer tags from the project\'s existing technologies, add new ones only if clearly needed' : 'suggest relevant technologies based on the task'}
+
+Example:
+{"task_type":"task","priority":"medium","story_points":3,"complexity":"Medium","time_estimation_days":0,"time_estimation_hours":4,"time_estimation_minutes":30,"technology_stack":["React","TypeScript"]${needsDescription ? ',"description":"Implement the feature as specified"' : ''}}`
+
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 300,
+      messages: [{ role: 'user', content: prompt }]
+    })
+
+    const text = response.content[0].type === 'text' ? response.content[0].text : ''
+    const parsed = JSON.parse(text.trim())
+
+    // Validate and return only valid values
+    const result: any = {}
+
+    if (needsDescription && parsed.description && typeof parsed.description === 'string') {
+      result.description = parsed.description.trim()
+    }
+    if (parsed.task_type && TASK_TYPES.includes(parsed.task_type)) {
+      result.task_type = parsed.task_type
+    }
+    if (parsed.priority && PRIORITIES.includes(parsed.priority)) {
+      result.priority = parsed.priority
+    }
+    if (typeof parsed.story_points === 'number' && STORY_POINTS.includes(parsed.story_points)) {
+      result.story_points = parsed.story_points
+    }
+    if (parsed.complexity && COMPLEXITIES.includes(parsed.complexity)) {
+      result.complexity = parsed.complexity
+    }
+    if (typeof parsed.time_estimation_days === 'number' && parsed.time_estimation_days >= 0) {
+      result.time_estimation_days = Math.floor(parsed.time_estimation_days)
+    }
+    if (typeof parsed.time_estimation_hours === 'number' && parsed.time_estimation_hours >= 0 && parsed.time_estimation_hours < 24) {
+      result.time_estimation_hours = Math.floor(parsed.time_estimation_hours)
+    }
+    if (typeof parsed.time_estimation_minutes === 'number' && parsed.time_estimation_minutes >= 0 && parsed.time_estimation_minutes < 60) {
+      result.time_estimation_minutes = Math.floor(parsed.time_estimation_minutes)
+    }
+    if (Array.isArray(parsed.technology_stack) && parsed.technology_stack.every((t: any) => typeof t === 'string')) {
+      result.technology_stack = parsed.technology_stack.map((t: string) => t.trim()).filter((t: string) => t.length > 0)
+    }
+
+    return result
+  } catch {
+    return {}
+  }
+}
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -593,9 +692,10 @@ serve(async (req) => {
         } = body
 
         // Validate required fields
-        if (!task_type || !TASK_TYPES.includes(task_type)) {
+        // task_type is optional - AI will auto-fill if not provided
+        if (task_type && !TASK_TYPES.includes(task_type)) {
           return new Response(
-            JSON.stringify({ success: false, error: `task_type is required and must be one of: ${TASK_TYPES.join(', ')}` }),
+            JSON.stringify({ success: false, error: `Invalid task_type. Use one of: ${TASK_TYPES.join(', ')}` }),
             { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           )
         }
@@ -684,25 +784,58 @@ serve(async (req) => {
           )
         }
 
-        // Create task
+        // AI auto-fill: if title provided and optional fields are empty, use AI to suggest values
+        let aiSuggestions: any = {}
+        const needsAiFill = title && (
+          !description ||
+          !task_type ||
+          !priority ||
+          story_points === undefined ||
+          !complexity ||
+          time_estimation_days === undefined ||
+          time_estimation_hours === undefined ||
+          time_estimation_minutes === undefined ||
+          !technology_stack || technology_stack.length === 0
+        )
+
+        if (needsAiFill) {
+          // Fetch project's existing technology tags from other tasks
+          const { data: projectTasks } = await supabaseAdmin
+            .from('tasks')
+            .select('technology_stack')
+            .eq('project_id', project_id)
+            .not('technology_stack', 'eq', '{}')
+            .limit(20)
+
+          // Collect unique tech tags from project
+          const projectTechStack = [...new Set(
+            (projectTasks || [])
+              .flatMap((t: any) => t.technology_stack || [])
+              .filter((tag: string) => tag && tag.trim())
+          )] as string[]
+
+          aiSuggestions = await aiAutoFillTaskFields(title, description || null, projectTechStack)
+        }
+
+        // Create task (AI suggestions fill empty fields only)
         const { data: task, error: taskError } = await supabaseAdmin
           .from('tasks')
           .insert({
-            task_type,
+            task_type: task_type || aiSuggestions.task_type || 'task',
             title: title.trim(),
-            description: description?.trim() || null,
+            description: description?.trim() || aiSuggestions.description || null,
             ticket_number: ticket_number.trim(),
             project_id,
-            priority: priority || 'medium',
-            story_points: story_points || null,
-            complexity: complexity || null,
-            status: taskStatus || 'Ready',
-            assigned_employee_id: assigned_employee_id || null,
+            priority: priority || aiSuggestions.priority || 'medium',
+            story_points: story_points ?? aiSuggestions.story_points ?? null,
+            complexity: complexity || aiSuggestions.complexity || null,
+            status: taskStatus || 'Backlog',
+            assigned_employee_id: assigned_employee_id || user.id, // Default to creator if not assigned
             reviewer_id: reviewer_id || user.id, // Default to current user as reviewer
-            technology_stack: technology_stack || [],
-            time_estimation_days: time_estimation_days || 0,
-            time_estimation_hours: time_estimation_hours || 0,
-            time_estimation_minutes: time_estimation_minutes || 0,
+            technology_stack: (technology_stack && technology_stack.length > 0) ? technology_stack : (aiSuggestions.technology_stack || []),
+            time_estimation_days: time_estimation_days ?? aiSuggestions.time_estimation_days ?? 0,
+            time_estimation_hours: time_estimation_hours ?? aiSuggestions.time_estimation_hours ?? 0,
+            time_estimation_minutes: time_estimation_minutes ?? aiSuggestions.time_estimation_minutes ?? 0,
             file_urls: file_urls || [],
             link_url: link_url?.trim() || null,
             created_by: user.id
